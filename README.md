@@ -1,5 +1,9 @@
 # AJProxy
 
+<p align="center">
+  <img src="banner.png" alt="AJProxy Banner" width="100%">
+</p>
+
 AJProxy is an ultra-fast, lightweight, and professional HTTP/HTTPS interception proxy and security testing tool built from the ground up in Rust. Leveraging Rust's memory safety, concurrency model, and high performance, AJProxy delivers sub-millisecond packet interception with a minimal system memory footprint. 
 
 It features a modern graphical user interface powered by egui, enabling security researchers and developers to intercept, inspect, and modify web traffic in real time.
@@ -34,7 +38,7 @@ cargo run --release
 
 ## Contributing
 
-We welcome contributions from the community! Please read [CONTRIBUTING.md](CONTRIBUTING.md) to learn how to propose changes, report bugs, and build the project locally.
+ We welcome contributions from the community! Please read [CONTRIBUTING.md](CONTRIBUTING.md) to learn how to propose changes, report bugs, and build the project locally.
 
 ## License
 
