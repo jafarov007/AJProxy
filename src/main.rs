@@ -23,6 +23,9 @@ fn main() -> eframe::Result<()> {
     // Ensure Root CA Certificate exists on startup (~/.config/ajproxy/ on Linux/macOS, %APPDATA%\ajproxy\ on Windows)
     if let Err(e) = proxy::cert::ensure_ca_cert_exists() {
         eprintln!("[AJProxy] CA Certificate warning: {}", e);
+    } else {
+        // Automatically and silently import Root CA to Chrome & Firefox local databases on startup (non-interactive)
+        proxy::cert::install_root_ca_to_nss_db();
     }
 
     // Start background TCP HTTP/HTTPS Proxy Listener on 127.0.0.1:8080

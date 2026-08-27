@@ -11,12 +11,16 @@ use wry::{ProxyConfig, ProxyEndpoint, WebViewBuilder};
 /// by executing `ajproxy --internal-browser <proxy_port>`.
 /// This avoids event loop conflicts with eframe and requires NO external browsers installed.
 pub fn launch_embedded_browser(proxy_port: u16, initial_url: Option<&str>) -> Result<(), String> {
-    let current_exe = std::env::current_exe()
-        .map_err(|e| format!("Failed to resolve current binary path: {}", e))?;
-
     let url = initial_url.unwrap_or("https://httpbin.org/get");
 
-    println!("[AJProxy] Spawning native Webview process: {} --internal-browser {} {}", current_exe.display(), proxy_port, url);
+    println!("[AJProxy] Attempting to spawn sandboxed browser (Chrome/Chromium/Firefox) with zero-config SSL trust...");
+    if let Ok(_) = spawn_fallback_browser(proxy_port, url) {
+        return Ok(());
+    }
+
+    println!("[AJProxy] Sandboxed browser launch failed. Falling back to spawning native Webview process...");
+    let current_exe = std::env::current_exe()
+        .map_err(|e| format!("Failed to resolve current binary path: {}", e))?;
 
     let child = Command::new(&current_exe)
         .arg("--internal-browser")
@@ -56,11 +60,24 @@ pub fn run_internal_browser_process(proxy_port: u16, target_url: &str) {
                 port: proxy_port.to_string(),
             };
 
+            #[cfg(target_os = "linux")]
+            let webview_builder = {
+                use tao::platform::unix::WindowExtUnix;
+                use wry::WebViewBuilderExtUnix;
+                let vbox = window.default_vbox().expect("Failed to get default vbox");
+                WebViewBuilder::new_gtk(vbox)
+            }
+            .with_url(target_url)
+            .with_proxy_config(ProxyConfig::Http(proxy_endpoint));
+
+            #[cfg(not(target_os = "linux"))]
             let webview_builder = WebViewBuilder::new(&window)
                 .with_url(target_url)
                 .with_proxy_config(ProxyConfig::Http(proxy_endpoint));
 
-            match webview_builder.build() {
+            let build_result = webview_builder.build();
+
+            match build_result {
                 Ok(_webview) => {
                     println!("[AJProxy Browser] WRY Native WebView initialized successfully!");
                     event_loop.run(move |event, _, control_flow| {
@@ -87,67 +104,37 @@ pub fn run_internal_browser_process(proxy_port: u16, target_url: &str) {
     }
 }
 
-fn prepare_chrome_profile_trust(proxy_port: u16) {
-    let profile_dir = format!("/tmp/ajproxy_chrome_profile_{}", proxy_port);
-    let path = std::path::Path::new(&profile_dir);
+fn spawn_fallback_browser(proxy_port: u16, target_url: &str) -> Result<(), String> {
+    let profile_dir_str = if let Some(home_dir) = home::home_dir() {
+        home_dir.join(format!(".config/ajproxy/chrome_profile_{}", proxy_port))
+            .to_string_lossy()
+            .to_string()
+    } else {
+        format!("/tmp/ajproxy_chrome_profile_{}", proxy_port)
+    };
+    let path = std::path::Path::new(&profile_dir_str);
     std::fs::create_dir_all(path).ok();
 
-    let cert_path = crate::proxy::cert::get_cert_path();
-    if cert_path.exists() {
-        let _ = Command::new("certutil")
-            .args(&["-d", &format!("sql:{}", profile_dir), "-N", "--empty-password"])
-            .output();
-
-        let _ = Command::new("certutil")
-            .args(&[
-                "-d", &format!("sql:{}", profile_dir),
-                "-A", "-t", "C,,",
-                "-n", "AJProxy Root CA",
-                "-i", &cert_path.to_string_lossy(),
-            ])
-            .output();
-    }
-}
-
-fn spawn_fallback_browser(proxy_port: u16, target_url: &str) -> Result<(), String> {
-    prepare_chrome_profile_trust(proxy_port);
     let proxy_arg = format!("127.0.0.1:{}", proxy_port);
-
-    let mut spki_flag = String::new();
-    if let Some(b64) = crate::proxy::cert::get_ca_spki_sha256_base64() {
-        spki_flag = format!("--ignore-certificate-errors-spki-list={}", b64);
-    }
 
     let mut chrome_args = vec![
         format!("--proxy-server={}", proxy_arg),
-        format!("--user-data-dir=/tmp/ajproxy_chrome_profile_{}", proxy_port),
-        "--ignore-certificate-errors".to_string(),
-        "--ignore-ssl-errors".to_string(),
-        "--test-type".to_string(),
-        "--disable-infobars".to_string(),
-        "--allow-insecure-localhost".to_string(),
+        format!("--user-data-dir={}", profile_dir_str),
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
+        "--disable-quic".to_string(),
+        "--disable-encrypted-client-hello".to_string(),
     ];
-    if !spki_flag.is_empty() {
-        chrome_args.push(spki_flag.clone());
-    }
     chrome_args.push(target_url.to_string());
 
     let mut chromium_args = vec![
         format!("--proxy-server={}", proxy_arg),
-        format!("--user-data-dir=/tmp/ajproxy_chromium_profile_{}", proxy_port),
-        "--ignore-certificate-errors".to_string(),
-        "--ignore-ssl-errors".to_string(),
-        "--test-type".to_string(),
-        "--disable-infobars".to_string(),
-        "--allow-insecure-localhost".to_string(),
+        format!("--user-data-dir={}", profile_dir_str),
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
+        "--disable-quic".to_string(),
+        "--disable-encrypted-client-hello".to_string(),
     ];
-    if !spki_flag.is_empty() {
-        chromium_args.push(spki_flag);
-    }
     chromium_args.push(target_url.to_string());
 
     let candidates: &[(&str, Vec<String>)] = &[
@@ -159,7 +146,12 @@ fn spawn_fallback_browser(proxy_port: u16, target_url: &str) -> Result<(), Strin
     ];
 
     for (bin, args) in candidates {
-        if Command::new(bin).args(args).spawn().is_ok() {
+        if Command::new(bin)
+            .args(args)
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+        {
             println!("[AJProxy Browser] Successfully spawned browser '{}' with zero-config SSL trust flags", bin);
             return Ok(());
         }

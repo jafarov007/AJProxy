@@ -101,7 +101,9 @@ impl AJProxyApp {
         let live_entries = crate::proxy::listener::get_captured_entries();
         if live_entries.len() != self.http_entries.len() {
             self.http_entries = live_entries;
-            self.rebuild_sitemap();
+            if self.active_tab == Tab::SiteMap {
+                self.rebuild_sitemap();
+            }
             ctx.request_repaint();
         }
     }
@@ -151,6 +153,9 @@ impl App for AJProxyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_theme(ctx);
         paint_background_gradient(ctx);
+
+        // Schedule continuous smooth UI repaint for live streaming traffic (100ms)
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
 
         // Sync live traffic from TCP proxy listener
         self.sync_live_traffic(ctx);

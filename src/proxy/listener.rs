@@ -44,6 +44,12 @@ lazy_static::lazy_static! {
     pub static ref TRAFFIC_STORE: Arc<Mutex<Vec<HttpEntry>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref PENDING_INTERCEPTS: Arc<Mutex<Vec<PendingIntercept>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref MATCH_REPLACE_RULES: Arc<Mutex<Vec<InterceptRule>>> = Arc::new(Mutex::new(Vec::new()));
+    pub static ref UPSTREAM_AGENT: ureq::Agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(std::time::Duration::from_secs(30))
+        .max_idle_connections(200)
+        .max_idle_connections_per_host(20)
+        .build();
 }
 
 pub fn update_match_rules(rules: Vec<InterceptRule>) {
@@ -122,7 +128,71 @@ pub fn clear_traffic_store() {
     }
 }
 
+/// Helper function to read a full HTTP request (headers + body) from a stream.
+/// It reads the headers first, parses the Content-Length, and then reads the exact remaining body bytes.
+fn read_full_http_request<R: std::io::Read>(reader: &mut R) -> Result<(String, Vec<u8>), std::io::Error> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let mut header_end_pos = None;
+
+    // 1. Read until we find "\r\n\r\n"
+    loop {
+        let n = reader.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..n]);
+        if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+            header_end_pos = Some(pos);
+            break;
+        }
+    }
+
+    let pos = match header_end_pos {
+        Some(p) => p,
+        None => {
+            let headers = String::from_utf8_lossy(&buffer).to_string();
+            return Ok((headers, Vec::new()));
+        }
+    };
+
+    let headers_str = String::from_utf8_lossy(&buffer[..pos]).to_string();
+    let mut body_bytes = buffer[pos + 4..].to_vec();
+
+    // 2. Parse Content-Length
+    let mut content_length = 0;
+    for line in headers_str.lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("content-length") {
+                if let Ok(len) = v.trim().parse::<usize>() {
+                    content_length = len;
+                }
+            }
+        }
+    }
+
+    // 3. Read the rest of the body if needed
+    if body_bytes.len() < content_length {
+        let mut remaining = content_length - body_bytes.len();
+        let mut body_chunk = vec![0u8; remaining.min(4096)];
+        while remaining > 0 {
+            let n = reader.read(&mut body_chunk)?;
+            if n == 0 {
+                break;
+            }
+            body_bytes.extend_from_slice(&body_chunk[..n]);
+            remaining -= n;
+            if remaining > 0 && body_chunk.len() > remaining {
+                body_chunk.resize(remaining, 0);
+            }
+        }
+    }
+
+    Ok((headers_str, body_bytes))
+}
+
 /// Helper function to split raw HTTP bytes into (headers, body)
+#[allow(dead_code)]
 fn parse_raw_http(raw_bytes: &[u8]) -> (String, String) {
     if let Some(pos) = raw_bytes.windows(4).position(|w| w == b"\r\n\r\n") {
         let headers = String::from_utf8_lossy(&raw_bytes[..pos]).to_string();
@@ -166,14 +236,13 @@ pub fn start_proxy_server(bind_addr: String, bind_port: u16) {
 
 fn handle_client_connection(mut client_stream: TcpStream) {
     let start_time = Instant::now();
-    let mut buffer = [0u8; 65536];
-    let bytes_read = match client_stream.read(&mut buffer) {
-        Ok(n) if n > 0 => n,
-        _ => return,
+    let _ = client_stream.set_read_timeout(Some(std::time::Duration::from_secs(15)));
+    let _ = client_stream.set_write_timeout(Some(std::time::Duration::from_secs(15)));
+    let (req_headers, req_body_bytes) = match read_full_http_request(&mut client_stream) {
+        Ok(res) => res,
+        Err(_) => return,
     };
-
-    let raw_request = &buffer[..bytes_read];
-    let (req_headers, req_body) = parse_raw_http(raw_request);
+    let req_body = String::from_utf8_lossy(&req_body_bytes).to_string();
     let (req_headers, req_body) = apply_match_replace_rules(req_headers, req_body);
     let request_str = &req_headers;
 
@@ -254,20 +323,59 @@ fn process_and_send_response(
     let status = resp.status();
     let content_type = resp.header("Content-Type").unwrap_or("text/html").to_string();
 
-    let mut resp_headers_str = format!("HTTP/1.1 {} OK\r\n", status);
+    let status_str = match status {
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        204 => "No Content",
+        206 => "Partial Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "OK",
+    };
+
+    // Collect all response headers for logging
+    let mut resp_headers_str = format!("HTTP/1.1 {} {}\r\n", status, status_str);
+    // Build actual response headers to send to browser
+    // Key: strip Content-Length, Transfer-Encoding, Content-Encoding
+    // because ureq auto-decompresses, so original values are wrong.
+    // We set our own correct Content-Length after reading the full body.
+    let mut forwarded_headers = String::new();
     for h_name in resp.headers_names() {
         if let Some(h_val) = resp.header(&h_name) {
             resp_headers_str.push_str(&format!("{}: {}\r\n", h_name, h_val));
+            if !h_name.eq_ignore_ascii_case("content-length")
+                && !h_name.eq_ignore_ascii_case("transfer-encoding")
+                && !h_name.eq_ignore_ascii_case("content-encoding")
+            {
+                forwarded_headers.push_str(&format!("{}: {}\r\n", h_name, h_val));
+            }
         }
     }
 
+    // Read full (already decompressed by ureq) response body
     let mut body_bytes = Vec::new();
     let _ = resp.into_reader().read_to_end(&mut body_bytes);
 
-    let http_resp = format!(
-        "HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        status, content_type, body_bytes.len()
-    );
+    // Build final HTTP response with correct Content-Length
+    let mut http_resp = format!("HTTP/1.1 {} {}\r\n", status, status_str);
+    http_resp.push_str(&forwarded_headers);
+    http_resp.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
+    http_resp.push_str("\r\n");
 
     let _ = tls_stream.write_all(http_resp.as_bytes());
     let _ = tls_stream.write_all(&body_bytes);
@@ -296,8 +404,8 @@ fn process_and_send_response(
     });
 }
 
-/// Full TLS MITM Interception Handler
-fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str, start_time: Instant) {
+/// Full TLS MITM Interception Handler with HTTP Keep-Alive
+fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str, _start_time: Instant) {
     let first_line = request_str.lines().next().unwrap_or("");
     let target = first_line
         .strip_prefix("CONNECT ")
@@ -310,11 +418,43 @@ fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str, st
 
     let target_host = target.split(':').next().unwrap_or(target).to_string();
 
+    // ── Direct TCP Passthrough for Video streaming CDNs & heavy media ──
+    let is_passthrough = target_host.contains("googlevideo.com")
+        || target_host.contains("gvt1.com")
+        || target_host.contains("ytimg.com");
+
+    if is_passthrough {
+        let ack = "HTTP/1.1 200 Connection Established\r\nProxy-Agent: AJProxy/0.1\r\n\r\n";
+        if client_stream.write_all(ack.as_bytes()).is_err() {
+            return;
+        }
+        let target_addr = if target.contains(':') { target.to_string() } else { format!("{}:443", target) };
+        if let Ok(mut server_stream) = TcpStream::connect(&target_addr) {
+            let mut client_clone = match client_stream.try_clone() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let mut server_clone = match server_stream.try_clone() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            thread::spawn(move || {
+                let _ = std::io::copy(&mut client_stream, &mut server_stream);
+            });
+            let _ = std::io::copy(&mut server_clone, &mut client_clone);
+        }
+        return;
+    }
+
     // Send 200 Connection Established ACK
     let ack = "HTTP/1.1 200 Connection Established\r\nProxy-Agent: AJProxy/0.1\r\n\r\n";
     if client_stream.write_all(ack.as_bytes()).is_err() {
         return;
     }
+
+    // Set socket-level timeouts for keep-alive lifecycle
+    let _ = client_stream.set_read_timeout(Some(std::time::Duration::from_secs(120)));
+    let _ = client_stream.set_write_timeout(Some(std::time::Duration::from_secs(30)));
 
     // Generate leaf cert
     let (cert_pem, key_pem) = match cert::generate_leaf_cert(&target_host) {
@@ -364,101 +504,145 @@ fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str, st
     let mut tls_stream = match acceptor.accept(client_stream) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[AJProxy MITM] Handshake failed with browser for {}: {}", target_host, e);
+            let err_msg = e.to_string();
+            if !err_msg.contains("unexpected EOF") && !err_msg.contains("Connection reset by peer") {
+                eprintln!("[AJProxy MITM] Handshake failed with browser for {}: {}", target_host, e);
+            }
             return;
         }
     };
 
-    let mut buf = [0u8; 65536];
-    let n = match tls_stream.read(&mut buf) {
-        Ok(n) if n > 0 => n,
-        _ => return,
-    };
+    // ── Keep-alive loop: handle multiple requests on same TLS connection ──
+    loop {
+        let request_start = Instant::now();
 
-    let (req_headers, req_body) = parse_raw_http(&buf[..n]);
-    let (req_headers, req_body) = apply_match_replace_rules(req_headers, req_body);
+        let (req_headers, req_body_bytes) = match read_full_http_request(&mut tls_stream) {
+            Ok(res) if !res.0.is_empty() => res,
+            _ => break, // Connection closed or timeout → exit loop
+        };
+        let req_body = String::from_utf8_lossy(&req_body_bytes).to_string();
+        let (req_headers, req_body) = apply_match_replace_rules(req_headers, req_body);
 
-    let first_line = req_headers.lines().next().unwrap_or("");
-    let parts: Vec<&str> = first_line.split_whitespace().collect();
-    if parts.len() < 2 {
-        return;
-    }
+        let first_line = req_headers.lines().next().unwrap_or("");
+        let parts: Vec<&str> = first_line.split_whitespace().collect();
+        if parts.len() < 2 {
+            break;
+        }
 
-    let method = parts[0].to_uppercase();
-    let raw_path = parts[1];
+        let method = parts[0].to_uppercase();
+        let raw_path = parts[1];
 
-    let full_url = if raw_path.starts_with("http://") || raw_path.starts_with("https://") {
-        raw_path.to_string()
-    } else {
-        format!("https://{}{}", target_host, raw_path)
-    };
-
-    // ── PAUSE IF INTERCEPT IS ON! ─────────────────────────────────────────
-    if is_intercept_enabled() {
-        let (tx, rx) = channel();
-        let entry_id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-
-        let pending = PendingIntercept {
-            id: entry_id,
-            method: method.clone(),
-            host: target_host.clone(),
-            path: raw_path.to_string(),
-            url: full_url.clone(),
-            headers: req_headers.to_string(),
-            body: req_body.to_string(),
-            responder: Arc::new(Mutex::new(Some(tx))),
+        let full_url = if raw_path.starts_with("http://") || raw_path.starts_with("https://") {
+            raw_path.to_string()
+        } else {
+            format!("https://{}{}", target_host, raw_path)
         };
 
-        if let Ok(mut lock) = PENDING_INTERCEPTS.lock() {
-            lock.push(pending);
-        }
+        // ── PAUSE IF INTERCEPT IS ON! ─────────────────────────────────────
+        if is_intercept_enabled() {
+            let (tx, rx) = channel();
+            let entry_id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
 
-        // Wait for user action in Intercept UI tab (Forward vs Drop)
-        match rx.recv() {
-            Ok(InterceptDecision::Forward) => {
-                // User clicked Forward! Proceed to real target server!
+            let pending = PendingIntercept {
+                id: entry_id,
+                method: method.clone(),
+                host: target_host.clone(),
+                path: raw_path.to_string(),
+                url: full_url.clone(),
+                headers: req_headers.to_string(),
+                body: req_body.to_string(),
+                responder: Arc::new(Mutex::new(Some(tx))),
+            };
+
+            if let Ok(mut lock) = PENDING_INTERCEPTS.lock() {
+                lock.push(pending);
             }
-            _ => {
-                // User clicked Drop! Return 502 Bad Gateway to browser!
-                let drop_resp = "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nRequest dropped by AJProxy Interceptor.";
-                let _ = tls_stream.write_all(drop_resp.as_bytes());
-                return;
-            }
-        }
-    }
 
-    // Forward decrypted request to real target server via HTTPS
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(12))
-        .build();
-
-    let mut req = agent.request(&method, &full_url);
-
-    for line in req_headers.lines().skip(1) {
-        if let Some((k, v)) = line.split_once(':') {
-            let k = k.trim();
-            let v = v.trim();
-            if !k.eq_ignore_ascii_case("Proxy-Connection") && !k.eq_ignore_ascii_case("Host") && !k.eq_ignore_ascii_case("Accept-Encoding") {
-                req = req.set(k, v);
+            match rx.recv() {
+                Ok(InterceptDecision::Forward) => {}
+                _ => {
+                    let drop_resp = "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nRequest dropped by AJProxy Interceptor.";
+                    let _ = tls_stream.write_all(drop_resp.as_bytes());
+                    break;
+                }
             }
         }
-    }
 
-    let send_res = if !req_body.is_empty() {
-        req.send_string(&req_body)
-    } else {
-        req.call()
-    };
+        let mut req = UPSTREAM_AGENT.request(&method, &full_url);
 
-    match send_res {
-        Ok(resp) => {
-            process_and_send_response(&mut tls_stream, resp, &method, &target_host, raw_path, &full_url, &req_headers, &req_body, start_time);
+        for line in req_headers.lines().skip(1) {
+            if let Some((k, v)) = line.split_once(':') {
+                let k = k.trim();
+                let v = v.trim();
+                if !k.eq_ignore_ascii_case("Proxy-Connection") && !k.eq_ignore_ascii_case("Host") {
+                    if k.eq_ignore_ascii_case("Accept-Encoding") {
+                        req = req.set(k, "gzip, deflate");
+                    } else {
+                        req = req.set(k, v);
+                    }
+                }
+            }
         }
-        Err(ureq::Error::Status(_, resp)) => {
-            process_and_send_response(&mut tls_stream, resp, &method, &target_host, raw_path, &full_url, &req_headers, &req_body, start_time);
-        }
-        Err(e) => {
-            eprintln!("[AJProxy MITM] Upstream HTTPS request failed for {}: {}", full_url, e);
+
+        let send_res = if !req_body_bytes.is_empty() {
+            req.send_bytes(&req_body_bytes)
+        } else {
+            req.call()
+        };
+
+        match send_res {
+            Ok(resp) => {
+                process_and_send_response(&mut tls_stream, resp, &method, &target_host, raw_path, &full_url, &req_headers, &req_body, request_start);
+            }
+            Err(ureq::Error::Status(_, resp)) => {
+                process_and_send_response(&mut tls_stream, resp, &method, &target_host, raw_path, &full_url, &req_headers, &req_body, request_start);
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                // Suppress spam for known-noisy Chrome background services, DNS failures & ad trackers
+                let is_noisy = full_url.contains("android.clients.google.com/checkin")
+                    || full_url.contains("clients1.google.com")
+                    || full_url.contains("clients2.google.com")
+                    || full_url.contains("update.googleapis.com")
+                    || full_url.contains("localhost.sensic.net")
+                    || full_url.contains("omnitagjs.com")
+                    || full_url.contains("presage.io")
+                    || full_url.contains("rubiconproject.com")
+                    || full_url.contains("play.google.com/log")
+                    || full_url.contains("cspreport")
+                    || full_url.contains("spotxchange.com")
+                    || full_url.contains("bluekai.com")
+                    || full_url.contains("addthis.com")
+                    || full_url.contains("lkqd.net")
+                    || full_url.contains("iqzone.com")
+                    || full_url.contains("colossusssp.com")
+                    || full_url.contains("stickyadstv.com")
+                    || full_url.contains("yieldmo.com")
+                    || full_url.contains("mathtag.com")
+                    || full_url.contains("drift-pixel.ai")
+                    || full_url.contains("gammaplatform.com")
+                    || full_url.contains("yandex.net")
+                    || full_url.contains("amitydigital.io")
+                    || full_url.contains("rtb-oveeo.com")
+                    || full_url.contains("googlevideo.com")
+                    || err_str.contains("HTTP version")
+                    || err_str.contains("Name or service not known")
+                    || err_str.contains("Connection refused");
+                if !is_noisy {
+                    eprintln!("[AJProxy MITM] Upstream error: {} → {}", full_url, e);
+                }
+                // Send 502 to browser and keep the loop alive
+                let error_body = "502 Bad Gateway";
+                let error_resp = format!(
+                    "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                    error_body.len(), error_body
+                );
+                if tls_stream.write_all(error_resp.as_bytes()).is_err() {
+                    break; // Browser connection dead
+                }
+                let _ = tls_stream.flush();
+                continue; // Keep loop alive for next request
+            }
         }
     }
 }
@@ -524,24 +708,24 @@ fn forward_http_request(mut client_stream: TcpStream, req_headers: &str, req_bod
                     }
                 }
 
-                let agent = ureq::AgentBuilder::new()
-                    .timeout(std::time::Duration::from_secs(12))
-                    .build();
-
-                let mut req = agent.request(&method, &full_url);
+                let mut req = UPSTREAM_AGENT.request(&method, &full_url);
 
                 for line in req_headers.lines().skip(1) {
                     if let Some((k, v)) = line.split_once(':') {
                         let k = k.trim();
                         let v = v.trim();
-                        if !k.eq_ignore_ascii_case("Proxy-Connection") && !k.eq_ignore_ascii_case("Host") && !k.eq_ignore_ascii_case("Accept-Encoding") {
-                            req = req.set(k, v);
+                        if !k.eq_ignore_ascii_case("Proxy-Connection") && !k.eq_ignore_ascii_case("Host") {
+                            if k.eq_ignore_ascii_case("Accept-Encoding") {
+                                req = req.set(k, "gzip, deflate");
+                            } else {
+                                req = req.set(k, v);
+                            }
                         }
                     }
                 }
 
                 let send_res = if !req_body.is_empty() {
-                    req.send_string(&req_body)
+                    req.send_bytes(req_body.as_bytes())
                 } else {
                     req.call()
                 };
@@ -559,20 +743,53 @@ fn forward_http_request(mut client_stream: TcpStream, req_headers: &str, req_bod
                     let status = resp.status();
                     let content_type = resp.header("Content-Type").unwrap_or("text/html").to_string();
 
-                    let mut resp_headers_str = format!("HTTP/1.1 {} OK\r\n", status);
+                    let status_str = match status {
+                        200 => "OK",
+                        201 => "Created",
+                        202 => "Accepted",
+                        204 => "No Content",
+                        206 => "Partial Content",
+                        301 => "Moved Permanently",
+                        302 => "Found",
+                        303 => "See Other",
+                        304 => "Not Modified",
+                        307 => "Temporary Redirect",
+                        308 => "Permanent Redirect",
+                        400 => "Bad Request",
+                        401 => "Unauthorized",
+                        403 => "Forbidden",
+                        404 => "Not Found",
+                        405 => "Method Not Allowed",
+                        409 => "Conflict",
+                        500 => "Internal Server Error",
+                        502 => "Bad Gateway",
+                        503 => "Service Unavailable",
+                        504 => "Gateway Timeout",
+                        _ => "OK",
+                    };
+
+                    // Collect all response headers for logging
+                    let mut resp_headers_str = format!("HTTP/1.1 {} {}\r\n", status, status_str);
+                    let mut forwarded_headers = String::new();
                     for h_name in resp.headers_names() {
                         if let Some(h_val) = resp.header(&h_name) {
                             resp_headers_str.push_str(&format!("{}: {}\r\n", h_name, h_val));
+                            if !h_name.eq_ignore_ascii_case("content-length")
+                                && !h_name.eq_ignore_ascii_case("transfer-encoding")
+                                && !h_name.eq_ignore_ascii_case("content-encoding")
+                            {
+                                forwarded_headers.push_str(&format!("{}: {}\r\n", h_name, h_val));
+                            }
                         }
                     }
 
                     let mut body_bytes = Vec::new();
                     let _ = resp.into_reader().read_to_end(&mut body_bytes);
 
-                    let http_resp = format!(
-                        "HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        status, content_type, body_bytes.len()
-                    );
+                    let mut http_resp = format!("HTTP/1.1 {} {}\r\n", status, status_str);
+                    http_resp.push_str(&forwarded_headers);
+                    http_resp.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
+                    http_resp.push_str("Connection: close\r\n\r\n");
 
                     let _ = client_stream.write_all(http_resp.as_bytes());
                     let _ = client_stream.write_all(&body_bytes);
@@ -583,7 +800,7 @@ fn forward_http_request(mut client_stream: TcpStream, req_headers: &str, req_bod
                         method: method.to_string(),
                         host,
                         path,
-                        url: full_url,
+                        url: full_url.to_string(),
                         status_code: status,
                         content_type: content_type.clone(),
                         length: body_bytes.len(),

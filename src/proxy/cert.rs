@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::fs;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::SystemTime;
 use time::OffsetDateTime;
 use rcgen::{
@@ -23,7 +23,7 @@ pub fn get_ca_dir() -> PathBuf {
 
 /// Returns the path to the Root CA Certificate.
 pub fn get_cert_path() -> PathBuf {
-    get_cert_dir().join("ca_cert.pem")
+    get_cert_dir().join("ca_cert_v2.pem")
 }
 
 #[allow(dead_code)]
@@ -33,7 +33,7 @@ pub fn get_ca_cert_path() -> PathBuf {
 
 /// Returns the path to the Root CA Private Key.
 pub fn get_ca_key_path() -> PathBuf {
-    get_cert_dir().join("ca_key.pem")
+    get_cert_dir().join("ca_key_v2.pem")
 }
 
 /// Ensures the Root CA certificate and private key exist, generating them if missing.
@@ -58,17 +58,12 @@ pub fn generate_and_save_ca() -> Result<(), Box<dyn std::error::Error>> {
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.serial_number = Some(1001.into());
 
-    let now_secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-
-    // Set valid starting date (1 day ago) and 10 years expiration for Root CA
-    params.not_before = OffsetDateTime::from_unix_timestamp(now_secs - 86400).unwrap_or(OffsetDateTime::UNIX_EPOCH);
-    params.not_after = OffsetDateTime::from_unix_timestamp(now_secs + (3650 * 86400)).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    // Deterministic fixed validity for Root CA (Jan 1, 2025 - Jan 1, 2035) to match signing CA reconstructed in memory
+    params.not_before = OffsetDateTime::from_unix_timestamp(1735689600).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    params.not_after = OffsetDateTime::from_unix_timestamp(1735689600 + (3650 * 86400)).unwrap_or(OffsetDateTime::UNIX_EPOCH);
 
     let mut dn = DistinguishedName::new();
-    dn.push(DnType::CommonName, "AJProxy Root Certificate Authority");
+    dn.push(DnType::CommonName, "AJProxy Root CA");
     dn.push(DnType::OrganizationName, "AJProxy Security Tools");
     dn.push(DnType::OrganizationalUnitName, "Interception Authority");
     params.distinguished_name = dn;
@@ -89,13 +84,14 @@ pub fn generate_and_save_ca() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("[AJProxy CA] Root CA certificate successfully created at: {:?}", cert_path);
 
-    install_root_ca_to_nss_db(&cert_path);
+    install_root_ca_to_nss_db();
 
     Ok(())
 }
 
 /// Computes the Base64-encoded SHA-256 digest of the Root CA's Subject Public Key Info (SPKI).
 /// Passed to Chrome via --ignore-certificate-errors-spki-list for zero-config trust!
+#[allow(dead_code)]
 pub fn get_ca_spki_sha256_base64() -> Option<String> {
     ensure_ca_cert_exists().ok()?;
     let cert_pem = fs::read_to_string(get_cert_path()).ok()?;
@@ -129,7 +125,7 @@ pub fn install_ca_system_wide() -> Result<String, String> {
             .arg(&cmd)
             .output();
 
-        install_root_ca_to_nss_db(&cert_path);
+        install_root_ca_to_nss_db();
 
         match output {
             Ok(out) if out.status.success() => {
@@ -151,25 +147,73 @@ pub fn import_ca_cert(src_path: &Path) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// Helper function to automatically install Root CA into Linux NSS Database (Chrome & Firefox)
-fn install_root_ca_to_nss_db(cert_path: &Path) {
+/// Automatically install Root CA into Linux NSS Databases (Chrome, Chromium, Firefox) non-interactively.
+pub fn install_root_ca_to_nss_db() {
     if cfg!(target_os = "linux") {
+        let cert_path = get_cert_path();
+        if !cert_path.exists() {
+            return;
+        }
+
+        let empty_pass_file = "/tmp/ajproxy_empty_pass.txt";
+        let _ = fs::write(empty_pass_file, "\n");
+
         if let Some(home_dir) = home::home_dir() {
             // 1. Chrome / Chromium NSS DB (~/.pki/nssdb)
             let nss_dir = home_dir.join(".pki/nssdb");
             if nss_dir.exists() {
                 println!("[AJProxy CA] Attempting automatic Root CA import to Chrome NSS DB (~/.pki/nssdb)...");
+                // Delete old cert first to avoid SEC_ERROR_ADDING_CERT
+                let _ = Command::new("certutil")
+                    .args(&[
+                        "-d", &format!("sql:{}", nss_dir.to_string_lossy()),
+                        "-D",
+                        "-n", "AJProxy Root CA",
+                        "-f", empty_pass_file,
+                    ])
+                    .stdin(Stdio::null())
+                    .output();
+
                 let _ = Command::new("certutil")
                     .args(&[
                         "-d", &format!("sql:{}", nss_dir.to_string_lossy()),
                         "-A", "-t", "C,,",
                         "-n", "AJProxy Root CA",
                         "-i", &cert_path.to_string_lossy(),
+                        "-f", empty_pass_file,
                     ])
+                    .stdin(Stdio::null())
                     .output();
             }
 
-            // 2. Firefox Profiles (~/.mozilla/firefox/*)
+            // 2. Modern Chrome / Chromium NSS DB (~/.local/share/pki/nssdb)
+            let modern_nss_dir = home_dir.join(".local/share/pki/nssdb");
+            if modern_nss_dir.exists() {
+                println!("[AJProxy CA] Attempting automatic Root CA import to Chrome modern NSS DB (~/.local/share/pki/nssdb)...");
+                // Delete old cert first to avoid SEC_ERROR_ADDING_CERT
+                let _ = Command::new("certutil")
+                    .args(&[
+                        "-d", &format!("sql:{}", modern_nss_dir.to_string_lossy()),
+                        "-D",
+                        "-n", "AJProxy Root CA",
+                        "-f", empty_pass_file,
+                    ])
+                    .stdin(Stdio::null())
+                    .output();
+
+                let _ = Command::new("certutil")
+                    .args(&[
+                        "-d", &format!("sql:{}", modern_nss_dir.to_string_lossy()),
+                        "-A", "-t", "C,,",
+                        "-n", "AJProxy Root CA",
+                        "-i", &cert_path.to_string_lossy(),
+                        "-f", empty_pass_file,
+                    ])
+                    .stdin(Stdio::null())
+                    .output();
+            }
+
+            // 3. Firefox Profiles (~/.mozilla/firefox/*)
             let firefox_dir = home_dir.join(".mozilla/firefox");
             if firefox_dir.exists() {
                 if let Ok(entries) = fs::read_dir(&firefox_dir) {
@@ -179,13 +223,26 @@ fn install_root_ca_to_nss_db(cert_path: &Path) {
                             let cert9_db = path.join("cert9.db");
                             if cert9_db.exists() {
                                 println!("[AJProxy CA] Attempting automatic Root CA import to Firefox Profile ({:?})...", path.file_name());
+                                // Delete old cert first to avoid SEC_ERROR_ADDING_CERT
+                                let _ = Command::new("certutil")
+                                    .args(&[
+                                        "-d", &format!("sql:{}", path.to_string_lossy()),
+                                        "-D",
+                                        "-n", "AJProxy Root CA",
+                                        "-f", empty_pass_file,
+                                    ])
+                                    .stdin(Stdio::null())
+                                    .output();
+
                                 let _ = Command::new("certutil")
                                     .args(&[
                                         "-d", &format!("sql:{}", path.to_string_lossy()),
                                         "-A", "-t", "C,,",
                                         "-n", "AJProxy Root CA",
                                         "-i", &cert_path.to_string_lossy(),
+                                        "-f", empty_pass_file,
                                     ])
+                                    .stdin(Stdio::null())
                                     .output();
                             }
                         }
@@ -196,8 +253,21 @@ fn install_root_ca_to_nss_db(cert_path: &Path) {
     }
 }
 
-/// Dynamically generates a leaf certificate signed by the Root CA for a given hostname.
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+lazy_static::lazy_static! {
+    static ref CERT_CACHE: Mutex<HashMap<String, (String, String)>> = Mutex::new(HashMap::new());
+}
+
+/// Dynamically generates a leaf certificate signed by the Root CA for a given hostname (with caching).
 pub fn generate_leaf_cert(domain: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
+    if let Ok(cache) = CERT_CACHE.lock() {
+        if let Some(cached) = cache.get(domain) {
+            return Ok(cached.clone());
+        }
+    }
+
     ensure_ca_cert_exists()?;
 
     let ca_key_pem = fs::read_to_string(get_ca_key_path())?;
@@ -211,11 +281,11 @@ pub fn generate_leaf_cert(domain: &str) -> Result<(String, String), Box<dyn std:
     let mut ca_params = CertificateParams::default();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params.serial_number = Some(1001.into());
-    ca_params.not_before = OffsetDateTime::from_unix_timestamp(now_secs - 86400).unwrap_or(OffsetDateTime::UNIX_EPOCH);
-    ca_params.not_after = OffsetDateTime::from_unix_timestamp(now_secs + (3650 * 86400)).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    ca_params.not_before = OffsetDateTime::from_unix_timestamp(1735689600).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    ca_params.not_after = OffsetDateTime::from_unix_timestamp(1735689600 + (3650 * 86400)).unwrap_or(OffsetDateTime::UNIX_EPOCH);
 
     let mut dn = DistinguishedName::new();
-    dn.push(DnType::CommonName, "AJProxy Root Certificate Authority");
+    dn.push(DnType::CommonName, "AJProxy Root CA");
     dn.push(DnType::OrganizationName, "AJProxy Security Tools");
     dn.push(DnType::OrganizationalUnitName, "Interception Authority");
     ca_params.distinguished_name = dn;
@@ -236,14 +306,18 @@ pub fn generate_leaf_cert(domain: &str) -> Result<(String, String), Box<dyn std:
 
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, domain);
-    dn.push(DnType::OrganizationName, "AJProxy Security Tools");
-    dn.push(DnType::OrganizationalUnitName, "Dynamic Interception Engine");
     params.distinguished_name = dn;
 
-    params.subject_alt_names = vec![
-        SanType::DnsName(domain.to_string()),
-        SanType::DnsName(format!("*.{}", domain)),
-    ];
+    if let Ok(ip) = domain.parse::<std::net::IpAddr>() {
+        params.subject_alt_names = vec![
+            SanType::IpAddress(ip),
+        ];
+    } else {
+        params.subject_alt_names = vec![
+            SanType::DnsName(domain.to_string()),
+            SanType::DnsName(format!("*.{}", domain)),
+        ];
+    }
 
     params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
     params.key_usages = vec![
@@ -257,6 +331,10 @@ pub fn generate_leaf_cert(domain: &str) -> Result<(String, String), Box<dyn std:
     let leaf_cert = Certificate::from_params(params)?;
     let cert_pem = leaf_cert.serialize_pem_with_signer(&ca_cert)?;
     let key_pem = leaf_cert.serialize_private_key_pem();
+
+    if let Ok(mut cache) = CERT_CACHE.lock() {
+        cache.insert(domain.to_string(), (cert_pem.clone(), key_pem.clone()));
+    }
 
     Ok((cert_pem, key_pem))
 }
