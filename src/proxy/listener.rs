@@ -46,20 +46,33 @@ fn read_full_http_request<R: std::io::Read>(reader: &mut R) -> Result<(String, V
     let headers_str = String::from_utf8_lossy(&buffer[..pos]).to_string();
     let mut body_bytes = buffer[pos + 4..].to_vec();
 
-    // 2. Parse Content-Length
+    // 2. Parse Content-Length and Transfer-Encoding
     let mut content_length = 0;
+    let mut is_chunked = false;
     for line in headers_str.lines() {
         if let Some((k, v)) = line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("content-length") {
+            let k = k.trim();
+            if k.eq_ignore_ascii_case("content-length") {
                 if let Ok(len) = v.trim().parse::<usize>() {
                     content_length = len;
                 }
+            } else if k.eq_ignore_ascii_case("transfer-encoding") && v.trim().to_lowercase().contains("chunked") {
+                is_chunked = true;
             }
         }
     }
 
     // 3. Read the rest of the body if needed
-    if body_bytes.len() < content_length {
+    if is_chunked {
+        while !body_bytes.windows(5).any(|w| w == b"0\r\n\r\n") {
+            let mut b = [0u8; 1024];
+            let n = reader.read(&mut b)?;
+            if n == 0 {
+                break;
+            }
+            body_bytes.extend_from_slice(&b[..n]);
+        }
+    } else if body_bytes.len() < content_length {
         let mut remaining = content_length - body_bytes.len();
         let mut body_chunk = vec![0u8; remaining.min(4096)];
         while remaining > 0 {
@@ -222,9 +235,9 @@ fn handle_client_connection(mut client_stream: TcpStream) {
     forward_http_request(client_stream, &req_headers, &req_body, start_time);
 }
 
-/// Helper function to process response and forward to client
-fn process_and_send_response(
-    tls_stream: &mut openssl::ssl::SslStream<TcpStream>,
+/// Helper function to process response and forward to client with SSE & Streaming support
+fn process_and_send_response<W: std::io::Write>(
+    stream: &mut W,
     resp: ureq::Response,
     method: &str,
     target_host: &str,
@@ -262,12 +275,15 @@ fn process_and_send_response(
         _ => "OK",
     };
 
+    let is_sse = content_type.to_lowercase().contains("text/event-stream")
+        || content_type.to_lowercase().contains("application/stream+json")
+        || content_type.to_lowercase().contains("application/x-ndjson");
+
+    let is_chunked_upstream = resp.header("transfer-encoding").map(|v| v.to_lowercase().contains("chunked")).unwrap_or(false);
+    let is_large_content = resp.header("content-length").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0) > 5 * 1024 * 1024;
+
     // Collect all response headers for logging
     let mut resp_headers_str = format!("HTTP/1.1 {} {}\r\n", status, status_str);
-    // Build actual response headers to send to browser
-    // Key: strip Content-Length, Transfer-Encoding, Content-Encoding
-    // because ureq auto-decompresses, so original values are wrong.
-    // We set our own correct Content-Length after reading the full body.
     let mut forwarded_headers = String::new();
     for h_name in resp.headers_names() {
         if let Some(h_val) = resp.header(&h_name) {
@@ -281,19 +297,88 @@ fn process_and_send_response(
         }
     }
 
-    // Read full (already decompressed by ureq) response body
+    // ── REAL-TIME STREAMING MODE (SSE / AI LLM Chat / Large Media Downloads) ──
+    if is_sse || (is_chunked_upstream && is_large_content) {
+        let mut http_resp = format!("HTTP/1.1 {} {}\r\n", status, status_str);
+        http_resp.push_str(&forwarded_headers);
+        if is_sse {
+            http_resp.push_str("Cache-Control: no-cache\r\nConnection: keep-alive\r\n");
+        } else if is_chunked_upstream {
+            http_resp.push_str("Transfer-Encoding: chunked\r\n");
+        }
+        http_resp.push_str("\r\n");
+
+        let _ = stream.write_all(http_resp.as_bytes());
+        let _ = stream.flush();
+
+        let mut reader = resp.into_reader();
+        let mut buf = [0u8; 8192];
+        let mut captured_bytes = Vec::new();
+
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if is_chunked_upstream && !is_sse {
+                        let chunk_header = format!("{:x}\r\n", n);
+                        if stream.write_all(chunk_header.as_bytes()).is_err() { break; }
+                        if stream.write_all(&buf[..n]).is_err() { break; }
+                        if stream.write_all(b"\r\n").is_err() { break; }
+                    } else {
+                        if stream.write_all(&buf[..n]).is_err() { break; }
+                    }
+                    let _ = stream.flush();
+
+                    if captured_bytes.len() < 16384 {
+                        let take = n.min(16384 - captured_bytes.len());
+                        captured_bytes.extend_from_slice(&buf[..take]);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        if is_chunked_upstream && !is_sse {
+            let _ = stream.write_all(b"0\r\n\r\n");
+            let _ = stream.flush();
+        }
+
+        let parsed_url = url::Url::parse(full_url).ok();
+        let host = parsed_url.as_ref().and_then(|u| u.host_str()).unwrap_or(target_host).to_string();
+        let path = parsed_url.as_ref().map(|u| u.path()).unwrap_or(raw_path).to_string();
+
+        push_captured_entry(HttpEntry {
+            id: next_entry_id(),
+            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+            method: method.to_string(),
+            host,
+            path,
+            url: full_url.to_string(),
+            status_code: status,
+            content_type: content_type.clone(),
+            length: captured_bytes.len(),
+            duration_ms: start_time.elapsed().as_millis() as u64,
+            protocol: "HTTP/1.1".to_string(),
+            request_headers: req_headers.to_string(),
+            request_body: req_body.to_string(),
+            response_headers: resp_headers_str,
+            response_body: String::from_utf8_lossy(&captured_bytes).to_string(),
+        });
+        return;
+    }
+
+    // Standard Response Mode
     let mut body_bytes = Vec::new();
     let _ = resp.into_reader().read_to_end(&mut body_bytes);
 
-    // Build final HTTP response with correct Content-Length
     let mut http_resp = format!("HTTP/1.1 {} {}\r\n", status, status_str);
     http_resp.push_str(&forwarded_headers);
     http_resp.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
     http_resp.push_str("\r\n");
 
-    let _ = tls_stream.write_all(http_resp.as_bytes());
-    let _ = tls_stream.write_all(&body_bytes);
-    let _ = tls_stream.flush();
+    let _ = stream.write_all(http_resp.as_bytes());
+    let _ = stream.write_all(&body_bytes);
+    let _ = stream.flush();
 
     let parsed_url = url::Url::parse(full_url).ok();
     let host = parsed_url.as_ref().and_then(|u| u.host_str()).unwrap_or(target_host).to_string();
@@ -480,6 +565,107 @@ fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str, _s
             }
         }
 
+        let is_websocket = req_headers.lines().any(|l| {
+            if let Some((k, v)) = l.split_once(':') {
+                let k = k.trim().to_lowercase();
+                let v = v.trim().to_lowercase();
+                (k == "upgrade" && v.contains("websocket")) || (k == "connection" && v.contains("upgrade"))
+            } else {
+                false
+            }
+        });
+
+        if is_websocket {
+            let mut connector_builder = match openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls()) {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+            connector_builder.set_verify(openssl::ssl::SslVerifyMode::NONE);
+            let connector = connector_builder.build();
+
+            let target_addr = if target_host.contains(':') {
+                target_host.clone()
+            } else {
+                format!("{}:443", target_host)
+            };
+
+            if let Ok(server_tcp) = TcpStream::connect(&target_addr) {
+                if let Ok(mut server_tls) = connector.connect(&target_host, server_tcp) {
+                    let _ = server_tls.write_all(req_headers.as_bytes());
+                    let _ = server_tls.write_all(b"\r\n\r\n");
+                    if !req_body_bytes.is_empty() {
+                        let _ = server_tls.write_all(&req_body_bytes);
+                    }
+                    let _ = server_tls.flush();
+
+                    push_captured_entry(HttpEntry {
+                        id: next_entry_id(),
+                        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                        method: method.to_string(),
+                        host: target_host.clone(),
+                        path: raw_path.to_string(),
+                        url: full_url.clone(),
+                        status_code: 101,
+                        content_type: "websocket".to_string(),
+                        length: 0,
+                        duration_ms: request_start.elapsed().as_millis() as u64,
+                        protocol: "HTTP/1.1".to_string(),
+                        request_headers: req_headers.to_string(),
+                        request_body: req_body.to_string(),
+                        response_headers: "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n".to_string(),
+                        response_body: "[WebSocket Bidirectional Tunnel Active]".to_string(),
+                    });
+
+                    let client_arc = Arc::new(Mutex::new(tls_stream));
+                    let server_arc = Arc::new(Mutex::new(server_tls));
+
+                    let c_clone = Arc::clone(&client_arc);
+                    let s_clone = Arc::clone(&server_arc);
+
+                    let h1 = thread::spawn(move || {
+                        let mut buf = [0u8; 8192];
+                        loop {
+                            let n = match c_clone.lock() {
+                                Ok(mut c) => match c.read(&mut buf) {
+                                    Ok(0) => break,
+                                    Ok(n) => n,
+                                    Err(_) => break,
+                                },
+                                Err(_) => break,
+                            };
+                            if let Ok(mut s) = s_clone.lock() {
+                                if s.write_all(&buf[..n]).is_err() { break; }
+                                let _ = s.flush();
+                            } else {
+                                break;
+                            }
+                        }
+                    });
+
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        let n = match server_arc.lock() {
+                            Ok(mut s) => match s.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => n,
+                                Err(_) => break,
+                            },
+                            Err(_) => break,
+                        };
+                        if let Ok(mut c) = client_arc.lock() {
+                            if c.write_all(&buf[..n]).is_err() { break; }
+                            let _ = c.flush();
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let _ = h1.join();
+                    return;
+                }
+            }
+        }
+
         let mut req = UPSTREAM_AGENT.request(&method, &full_url);
 
         for line in req_headers.lines().skip(1) {
@@ -620,6 +806,61 @@ fn forward_http_request(mut client_stream: TcpStream, req_headers: &str, req_bod
                     }
                 }
 
+                let is_websocket = req_headers.lines().any(|l| {
+                    if let Some((k, v)) = l.split_once(':') {
+                        let k = k.trim().to_lowercase();
+                        let v = v.trim().to_lowercase();
+                        (k == "upgrade" && v.contains("websocket")) || (k == "connection" && v.contains("upgrade"))
+                    } else {
+                        false
+                    }
+                });
+
+                if is_websocket {
+                    let target_addr = if host.contains(':') { host.clone() } else { format!("{}:80", host) };
+                    if let Ok(mut server_tcp) = TcpStream::connect(&target_addr) {
+                        let _ = server_tcp.write_all(req_headers.as_bytes());
+                        let _ = server_tcp.write_all(b"\r\n\r\n");
+                        if !req_body.is_empty() {
+                            let _ = server_tcp.write_all(req_body.as_bytes());
+                        }
+                        let _ = server_tcp.flush();
+
+                        push_captured_entry(HttpEntry {
+                            id: next_entry_id(),
+                            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                            method: method.to_string(),
+                            host: host.clone(),
+                            path: path.clone(),
+                            url: full_url.clone(),
+                            status_code: 101,
+                            content_type: "websocket".to_string(),
+                            length: 0,
+                            duration_ms: start_time.elapsed().as_millis() as u64,
+                            protocol: "HTTP/1.1".to_string(),
+                            request_headers: req_headers.to_string(),
+                            request_body: req_body.to_string(),
+                            response_headers: "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n".to_string(),
+                            response_body: "[WebSocket Bidirectional Tunnel Active]".to_string(),
+                        });
+
+                        let mut client_clone = match client_stream.try_clone() {
+                            Ok(c) => c,
+                            Err(_) => return,
+                        };
+                        let mut server_clone = match server_tcp.try_clone() {
+                            Ok(s) => s,
+                            Err(_) => return,
+                        };
+
+                        thread::spawn(move || {
+                            let _ = std::io::copy(&mut client_clone, &mut server_clone);
+                        });
+                        let _ = std::io::copy(&mut server_tcp, &mut client_stream);
+                        return;
+                    }
+                }
+
                 let mut req = UPSTREAM_AGENT.request(&method, &full_url);
 
                 for line in req_headers.lines().skip(1) {
@@ -652,77 +893,7 @@ fn forward_http_request(mut client_stream: TcpStream, req_headers: &str, req_bod
                 };
 
                 if let Some(resp) = resp_opt {
-                    let status = resp.status();
-                    let content_type = resp.header("Content-Type").unwrap_or("text/html").to_string();
-
-                    let status_str = match status {
-                        200 => "OK",
-                        201 => "Created",
-                        202 => "Accepted",
-                        204 => "No Content",
-                        206 => "Partial Content",
-                        301 => "Moved Permanently",
-                        302 => "Found",
-                        303 => "See Other",
-                        304 => "Not Modified",
-                        307 => "Temporary Redirect",
-                        308 => "Permanent Redirect",
-                        400 => "Bad Request",
-                        401 => "Unauthorized",
-                        403 => "Forbidden",
-                        404 => "Not Found",
-                        405 => "Method Not Allowed",
-                        409 => "Conflict",
-                        500 => "Internal Server Error",
-                        502 => "Bad Gateway",
-                        503 => "Service Unavailable",
-                        504 => "Gateway Timeout",
-                        _ => "OK",
-                    };
-
-                    // Collect all response headers for logging
-                    let mut resp_headers_str = format!("HTTP/1.1 {} {}\r\n", status, status_str);
-                    let mut forwarded_headers = String::new();
-                    for h_name in resp.headers_names() {
-                        if let Some(h_val) = resp.header(&h_name) {
-                            resp_headers_str.push_str(&format!("{}: {}\r\n", h_name, h_val));
-                            if !h_name.eq_ignore_ascii_case("content-length")
-                                && !h_name.eq_ignore_ascii_case("transfer-encoding")
-                                && !h_name.eq_ignore_ascii_case("content-encoding")
-                            {
-                                forwarded_headers.push_str(&format!("{}: {}\r\n", h_name, h_val));
-                            }
-                        }
-                    }
-
-                    let mut body_bytes = Vec::new();
-                    let _ = resp.into_reader().read_to_end(&mut body_bytes);
-
-                    let mut http_resp = format!("HTTP/1.1 {} {}\r\n", status, status_str);
-                    http_resp.push_str(&forwarded_headers);
-                    http_resp.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
-                    http_resp.push_str("Connection: close\r\n\r\n");
-
-                    let _ = client_stream.write_all(http_resp.as_bytes());
-                    let _ = client_stream.write_all(&body_bytes);
-
-                    push_captured_entry(HttpEntry {
-                        id: next_entry_id(),
-                        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                        method: method.to_string(),
-                        host,
-                        path,
-                        url: full_url.to_string(),
-                        status_code: status,
-                        content_type: content_type.clone(),
-                        length: body_bytes.len(),
-                        duration_ms: start_time.elapsed().as_millis() as u64,
-                        protocol: "HTTP/1.1".to_string(),
-                        request_headers: req_headers.to_string(),
-                        request_body: req_body.to_string(),
-                        response_headers: resp_headers_str,
-                        response_body: String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(16384)]).to_string(),
-                    });
+                    process_and_send_response(&mut client_stream, resp, &method, &host, &path, &full_url, &req_headers, &req_body, start_time);
                 }
             }
         }
