@@ -67,7 +67,24 @@ pub fn execute_repeater_request(tab: &mut RepeaterTab) {
 
     if let Some(resp) = resp_opt {
         let status = resp.status();
-        let mut raw_resp = format!("HTTP/1.1 {} OK\r\n", status);
+        let status_text = match status {
+            200 => "OK",
+            201 => "Created",
+            204 => "No Content",
+            301 => "Moved Permanently",
+            302 => "Found",
+            304 => "Not Modified",
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            404 => "Not Found",
+            405 => "Method Not Allowed",
+            500 => "Internal Server Error",
+            502 => "Bad Gateway",
+            503 => "Service Unavailable",
+            _ => "OK",
+        };
+        let mut raw_resp = format!("HTTP/1.1 {} {}\r\n", status, status_text);
         for h_name in resp.headers_names() {
             if let Some(h_val) = resp.header(&h_name) {
                 raw_resp.push_str(&format!("{}: {}\r\n", h_name, h_val));

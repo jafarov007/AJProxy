@@ -47,6 +47,8 @@ impl AJProxyApp {
                 current_request: String::new(),
                 match_rules: vec![],
                 queue_count: 0,
+                show_rules_modal: false,
+                selected_paused_id: None,
             },
             repeater_tabs: vec![
                 RepeaterTab {
@@ -98,6 +100,15 @@ impl AJProxyApp {
     }
 
     pub fn sync_live_traffic(&mut self, ctx: &egui::Context) {
+        crate::proxy::listener::update_noise_filter_settings(
+            crate::proxy::listener::NoiseFilterFlags {
+                filter_scripts_styles_fonts: self.settings.filter_scripts_styles_fonts,
+                filter_images_media: self.settings.filter_images_media,
+                filter_noisy_domains: self.settings.filter_noisy_domains,
+            }
+        );
+        crate::proxy::listener::update_passthrough_hosts(&self.settings.passthrough_hosts);
+
         let live_entries = crate::proxy::listener::get_captured_entries();
         if live_entries.len() != self.http_entries.len() {
             self.http_entries = live_entries;
@@ -190,6 +201,14 @@ impl App for AJProxyApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
 
+        // Compute noise-filtered entry list for UI rendering
+        let filtered_entries: Vec<HttpEntry> = self
+            .http_entries
+            .iter()
+            .filter(|e| !self.settings.is_filtered_noise(&e.url, &e.path, &e.content_type))
+            .cloned()
+            .collect();
+
         // Bottom Status Bar
         TopBottomPanel::bottom("status_bar")
             .exact_height(28.0)
@@ -197,7 +216,7 @@ impl App for AJProxyApp {
                 status_bar::render(
                     ui,
                     self.proxy_running,
-                    self.http_entries.len(),
+                    filtered_entries.len(),
                     0,
                 );
             });
@@ -208,20 +227,26 @@ impl App for AJProxyApp {
                 Tab::Dashboard => {
                     dashboard::render(
                         ui,
-                        &self.http_entries,
+                        &filtered_entries,
                         self.proxy_running,
                     );
                 }
                 Tab::Traffic => {
                     let action = traffic::render(
                         ui,
-                        &self.http_entries,
+                        &filtered_entries,
                         &mut self.selected_entry,
                         &mut self.filter_state,
                         &mut self.detail_tab,
                         &mut self.header_rules,
                         &mut self.show_header_panel,
+                        ctx,
                     );
+                    if action.clear_history {
+                        self.http_entries.clear();
+                        self.selected_entry = None;
+                        crate::proxy::listener::clear_captured_entries();
+                    }
                     if let Some(id) = action.send_to_repeater {
                         if let Some(entry) = self.http_entries.iter().find(|e| e.id as usize == id) {
                             let is_tls = entry.url.starts_with("https");
@@ -257,7 +282,7 @@ impl App for AJProxyApp {
                     }
                 }
                 Tab::Intercept => {
-                    if let intercept::InterceptUIAction::SendToRepeater(host, port, req_raw, is_tls) = intercept::render(ui, &mut self.intercept_state) {
+                    if let intercept::InterceptUIAction::SendToRepeater(host, port, req_raw, is_tls) = intercept::render(ui, &mut self.intercept_state, &mut self.settings, ctx) {
                         self.repeater_tabs.push(RepeaterTab {
                             name: format!("Tab {}", self.repeater_tabs.len() + 1),
                             target_host: host,

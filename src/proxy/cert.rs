@@ -258,6 +258,7 @@ use std::sync::Mutex;
 
 lazy_static::lazy_static! {
     static ref CERT_CACHE: Mutex<HashMap<String, (String, String)>> = Mutex::new(HashMap::new());
+    static ref CA_KEY_PEM_CACHE: Mutex<Option<String>> = Mutex::new(None);
 }
 
 /// Dynamically generates a leaf certificate signed by the Root CA for a given hostname (with caching).
@@ -270,7 +271,16 @@ pub fn generate_leaf_cert(domain: &str) -> Result<(String, String), Box<dyn std:
 
     ensure_ca_cert_exists()?;
 
-    let ca_key_pem = fs::read_to_string(get_ca_key_path())?;
+    let ca_key_pem = {
+        let mut cached_pem = CA_KEY_PEM_CACHE.lock().unwrap();
+        if let Some(ref pem) = *cached_pem {
+            pem.clone()
+        } else {
+            let pem = fs::read_to_string(get_ca_key_path())?;
+            *cached_pem = Some(pem.clone());
+            pem
+        }
+    };
     let ca_key_pair = KeyPair::from_pem(&ca_key_pem)?;
 
     let now_secs = SystemTime::now()

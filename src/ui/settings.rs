@@ -237,18 +237,29 @@ pub fn render(ui: &mut egui::Ui, settings: &mut AppSettings) {
 
             ui.add_space(8.0);
 
-            // ── Section 3: Intercept & Passthrough Options ───────────────────
+            // ── Section 3: Traffic Noise & Asset Filtering ────────────────────
             section_frame().show(ui, |ui| {
-                ui.label(RichText::new("Interception & Scope Rules").size(13.0).color(TEXT_0).strong());
+                ui.label(RichText::new("Traffic Noise & Asset Filtering").size(13.0).color(TEXT_0).strong());
+                ui.label(RichText::new("Hide non-essential background assets, static scripts, images, and telemetry from Dashboard, HTTP History, and Intercept.").size(11.0).color(TEXT_2));
                 ui.separator();
                 ui.add_space(4.0);
 
-                ui.checkbox(&mut settings.intercept_requests, "Intercept HTTP Requests in real-time");
-                ui.checkbox(&mut settings.intercept_responses, "Intercept HTTP Responses in real-time");
-                ui.add_space(6.0);
+                ui.checkbox(
+                    &mut settings.filter_scripts_styles_fonts,
+                    "Filter CSS, JS & Fonts (.css, .js, .woff, .woff2, .ttf | text/css, font/*, javascript)",
+                );
+                ui.add_space(3.0);
 
-                ui.label(RichText::new("SSL Passthrough Hosts (comma separated):").size(11.0).color(TEXT_1).strong());
-                ui.add(egui::TextEdit::singleline(&mut settings.passthrough_hosts).desired_width(f32::INFINITY));
+                ui.checkbox(
+                    &mut settings.filter_images_media,
+                    "Filter Images & Media (.png, .jpg, .jpeg, .gif, .svg, .ico | image/*)",
+                );
+                ui.add_space(3.0);
+
+                ui.checkbox(
+                    &mut settings.filter_noisy_domains,
+                    "Filter Cloudflare & Google Noisy Domains (challenges.cloudflare.com, *.google.com)",
+                );
             });
         });
 }

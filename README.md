@@ -10,16 +10,26 @@ It features a modern graphical user interface powered by egui, enabling security
 
 ## Key Features
 
-- **Built with Rust**: Inherits Rust's performance, stability, safety, and speed.
+- **Built with Rust**: Inherits Rust's high performance, thread safety, and sub-millisecond network execution speed.
 - **Multi-Listener Proxying**: Configure multiple ports and binding interfaces with support for HTTP/1.1, HTTP/2, and automatic protocol detection.
 - **Real-Time Interception**: Intercept and modify HTTP/HTTPS requests and responses on the fly.
+- **Traffic Noise & Asset Filtering**: Toggleable, pre-configured noise filters in Settings (enabled by default) to keep Dashboard, Intercept, and HTTP History completely clean:
+  - **CSS, JS & Fonts**: Hides `.css`, `.js`, `.woff`, `.woff2`, `.ttf` files and `text/css`, `font/*`, `javascript` headers.
+  - **Images & Media**: Hides `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.ico` files and `image/*` headers.
+  - **Noisy Domains & Telemetry**: Hides `challenges.cloudflare.com`, `*.google.com`, `gstatic.com`, and ad-sync trackers.
 - **Dynamic SSL/TLS MITM Decryption**: Automatically generates a 365-day compliant Root CA. Offers one-click automatic CA trust installation for Linux/Ubuntu systems and major browsers (Chrome/Firefox).
-- **SSL Passthrough**: Exclude specific hostnames from decryption to pass traffic through seamlessly.
+- **Direct TCP Media Passthrough**: Zero-overhead passthrough for video streaming CDNs (`googlevideo.com`, `gvt1.com`, `ytimg.com`) ensuring 4K video streaming without buffering.
 - **Security Testing Toolkit**: Includes tools such as Dashboard, Repeater, Sitemap, Comparer, Decoder, Traffic viewer, and Intruder/Bruteforce modules.
+
+## Legal & Educational Disclaimer
+
+> **IMPORTANT**: AJProxy is strictly intended for **authorized penetration testing, ethical security research, and educational purposes only**. You may only use this tool against computer systems, web applications, and networks for which you have explicit, documented authorization from the owner.
+> 
+> The developers and contributors of AJProxy assume no liability and are not responsible for any misuse, damage, unauthorized interception, or illegal activity conducted with this software. Users bear full responsibility for compliance with all applicable local, national, and international cyber laws.
 
 ## Prerequisites
 
-To build and run AJProxy, ensure you have Rust (cargo) installed.
+To build and run AJProxy, ensure you have Rust (`cargo`) installed.
 
 ### Linux (Debian/Ubuntu) Dependencies
 Install the required system build tools and development libraries:
@@ -38,7 +48,7 @@ cargo run --release
 
 ## Contributing
 
- We welcome contributions from the community! Please read [CONTRIBUTING.md](CONTRIBUTING.md) to learn how to propose changes, report bugs, and build the project locally.
+We welcome contributions from the community! Please read [CONTRIBUTING.md](CONTRIBUTING.md) to learn how to propose changes, report bugs, and build the project locally.
 
 ## License
 

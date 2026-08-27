@@ -43,7 +43,7 @@ pub fn render(
         );
 
         if globe_btn.clicked() {
-            if let Err(e) = crate::browser::webview::launch_embedded_browser(listen_port, Some("https://httpbin.org/get")) {
+            if let Err(e) = crate::browser::webview::launch_embedded_browser(listen_port, Some("https://jafarov007.github.io/")) {
                 eprintln!("[AJProxy] Internal browser launch error: {}", e);
             }
         }

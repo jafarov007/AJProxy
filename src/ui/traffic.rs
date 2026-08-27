@@ -1,6 +1,8 @@
 use eframe::egui::{self, Color32, FontFamily, RichText, Stroke, TextStyle};
-use crate::models::{HttpEntry, FilterState, HeaderInjectionRule};
+use crate::models::{HttpEntry, FilterState, HeaderInjectionRule, TrafficAction};
 use crate::ui::syntax;
+use std::fs::File;
+use std::io::Write;
 
 // ── Color Palette ─────────────────────────────────────────────────────────────
 const BG_DARK: Color32 = Color32::from_rgb(18, 18, 20);
@@ -13,31 +15,43 @@ const ACCENT_AMBER: Color32 = Color32::from_rgb(251, 146, 60);
 const ACCENT_PURPLE: Color32 = Color32::from_rgb(192, 132, 252);
 const ACCENT_RED: Color32 = Color32::from_rgb(248, 113, 113);
 
+const TEXT_0: Color32 = Color32::from_rgb(255, 255, 255);
 const TEXT_1: Color32 = Color32::from_rgb(240, 246, 252);
 const TEXT_2: Color32 = Color32::from_rgb(148, 163, 184);
-
-// ── Action Struct ──────────────────────────────────────────────────────────────
-pub struct TrafficAction {
-    pub send_to_repeater: Option<usize>,
-}
 
 // ── Main UI Function ──────────────────────────────────────────────────────────
 pub fn render(
     ui: &mut egui::Ui,
     entries: &[HttpEntry],
     selected_id: &mut Option<usize>,
-    _filter_state: &mut FilterState,
+    filter_state: &mut FilterState,
     active_tab: &mut usize, // 0 = Request, 1 = Response, 2 = Split View
     _header_rules: &mut Vec<HeaderInjectionRule>,
     _show_header_panel: &mut bool,
+    ctx: &egui::Context,
 ) -> TrafficAction {
-    let mut action = TrafficAction { send_to_repeater: None };
+    let mut action = TrafficAction::default();
 
     ui.vertical(|ui| {
         // ── Top Toolbar ───────────────────────────────────────────────────────
         ui.horizontal(|ui| {
             ui.label(RichText::new("HTTP HISTORY").size(14.0).color(ACCENT_CYAN).strong());
             ui.label(RichText::new(format!("({} captured)", entries.len())).size(11.0).color(TEXT_2));
+            
+            ui.add_space(10.0);
+
+            // 🗑 Clear History Button
+            if ui.add(egui::Button::new(RichText::new("🗑 Clear History").size(11.0).color(ACCENT_RED))).clicked() {
+                action.clear_history = true;
+                *selected_id = None;
+            }
+
+            // 📥 Export History Button
+            if ui.add(egui::Button::new(RichText::new("📥 Export History").size(11.0).color(ACCENT_BLUE))).clicked() {
+                filter_state.show_export_modal = true;
+                filter_state.export_status_msg = String::new();
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(id) = *selected_id {
                     if entries.iter().any(|e| e.id as usize == id) {
@@ -50,6 +64,10 @@ pub fn render(
         });
         ui.add_space(4.0);
 
+        let has_selection = selected_id.is_some() && entries.iter().any(|e| selected_id.map(|id| e.id as usize == id).unwrap_or(false));
+        let avail_h = ui.available_height();
+        let table_max_h = if has_selection { (avail_h * 0.38).clamp(140.0, 240.0) } else { avail_h - 10.0 };
+
         // ── Traffic Table ─────────────────────────────────────────────────────
         egui::Frame::none()
             .fill(BG_CARD)
@@ -59,6 +77,7 @@ pub fn render(
                     .striped(true)
                     .resizable(true)
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                    .max_scroll_height(table_max_h)
                     .column(egui_extras::Column::initial(45.0))  // ID
                     .column(egui_extras::Column::initial(70.0))  // Method Badge
                     .column(egui_extras::Column::initial(160.0)) // Host
@@ -158,54 +177,182 @@ pub fn render(
                         });
                         ui.separator();
 
-                        match *active_tab {
-                            0 => render_inspector_section(ui, entry, true),
-                            1 => render_inspector_section(ui, entry, false),
-                            _ => {
-                                // Split View: Left = Request, Right = Response
-                                ui.columns(2, |cols| {
-                                    render_inspector_section(&mut cols[0], entry, true);
-                                    render_inspector_section(&mut cols[1], entry, false);
-                                });
-                            }
-                        }
+                        egui::ScrollArea::vertical()
+                            .id_source("traffic_inspector_scroll")
+                            .max_height(ui.available_height() - 8.0)
+                            .show(ui, |ui| {
+                                match *active_tab {
+                                    0 => render_inspector_section(ui, entry, true),
+                                    1 => render_inspector_section(ui, entry, false),
+                                    _ => {
+                                        // Split View: Left = Request, Right = Response
+                                        ui.columns(2, |cols| {
+                                            render_inspector_section(&mut cols[0], entry, true);
+                                            render_inspector_section(&mut cols[1], entry, false);
+                                        });
+                                    }
+                                }
+                            });
                     });
             }
         }
     });
 
+    // ── Export History Modal Dialog Window ─────────────────────────────────────
+    if filter_state.show_export_modal {
+        let mut is_open = filter_state.show_export_modal;
+        egui::Window::new(RichText::new("📥 Export Traffic History Logs").size(14.0).color(TEXT_0).strong())
+            .open(&mut is_open)
+            .collapsible(false)
+            .resizable(false)
+            .default_size([500.0, 320.0])
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.label(RichText::new(format!("Select export format and destination folder for {} captured requests:", entries.len())).size(11.0).color(TEXT_2));
+                ui.separator();
+                ui.add_space(8.0);
+
+                // Option 1: JSON Export
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("1. JSON Format (.json)").size(12.0).color(ACCENT_CYAN).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(RichText::new("📂 Choose Folder & Save JSON").size(11.0).color(ACCENT_GREEN)).clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_title("Export AJProxy Traffic History (JSON)")
+                                .set_file_name("ajproxy_history.json")
+                                .add_filter("JSON File", &["json"])
+                                .save_file()
+                            {
+                                let data = serde_json::to_string_pretty(entries).unwrap_or_default();
+                                if let Ok(mut f) = File::create(&path) {
+                                    let _ = f.write_all(data.as_bytes());
+                                    filter_state.export_path = path.to_string_lossy().to_string();
+                                    filter_state.export_status_msg = format!("✔ Saved: {}", filter_state.export_path);
+                                }
+                            }
+                        }
+                    });
+                });
+                ui.label(RichText::new("Full structured data including headers, bodies, timestamps, and status codes.").size(10.0).color(TEXT_2));
+
+                ui.add_space(10.0);
+
+                // Option 2: CSV Export
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("2. CSV Spreadsheet (.csv)").size(12.0).color(ACCENT_CYAN).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(RichText::new("📂 Choose Folder & Save CSV").size(11.0).color(ACCENT_GREEN)).clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_title("Export AJProxy Traffic History (CSV)")
+                                .set_file_name("ajproxy_history.csv")
+                                .add_filter("CSV File", &["csv"])
+                                .save_file()
+                            {
+                                let mut csv_buf = String::from("ID,Timestamp,Method,Host,Path,Status,Length,DurationMs,URL\n");
+                                for e in entries {
+                                    csv_buf.push_str(&format!(
+                                        "\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"\n",
+                                        e.id, e.timestamp, e.method, e.host, e.path, e.status_code, e.length, e.duration_ms, e.url
+                                    ));
+                                }
+                                if let Ok(mut f) = File::create(&path) {
+                                    let _ = f.write_all(csv_buf.as_bytes());
+                                    filter_state.export_path = path.to_string_lossy().to_string();
+                                    filter_state.export_status_msg = format!("✔ Saved: {}", filter_state.export_path);
+                                }
+                            }
+                        }
+                    });
+                });
+                ui.label(RichText::new("Spreadsheet table format compatible with Excel, LibreOffice Calc, and Python.").size(10.0).color(TEXT_2));
+
+                ui.add_space(10.0);
+
+                // Option 3: Plain Text / Burp Log Export
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("3. Burp Raw Text Log (.log)").size(12.0).color(ACCENT_CYAN).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(RichText::new("📂 Choose Folder & Save LOG").size(11.0).color(ACCENT_GREEN)).clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_title("Export AJProxy Traffic History (LOG)")
+                                .set_file_name("ajproxy_history.log")
+                                .add_filter("Log File", &["log", "txt"])
+                                .save_file()
+                            {
+                                let mut log_buf = String::new();
+                                for e in entries {
+                                    log_buf.push_str(&format!("========================================================================\n"));
+                                    log_buf.push_str(&format!("HTTP ENTRY #{}: {} {} -> Status {}\n", e.id, e.method, e.url, e.status_code));
+                                    log_buf.push_str(&format!("--- REQUEST ---\n{}\n\n{}", e.request_headers, e.request_body));
+                                    log_buf.push_str(&format!("\n--- RESPONSE ---\n{}\n\n{}\n\n", e.response_headers, e.response_body));
+                                }
+                                if let Ok(mut f) = File::create(&path) {
+                                    let _ = f.write_all(log_buf.as_bytes());
+                                    filter_state.export_path = path.to_string_lossy().to_string();
+                                    filter_state.export_status_msg = format!("✔ Saved: {}", filter_state.export_path);
+                                }
+                            }
+                        }
+                    });
+                });
+                ui.label(RichText::new("Raw HTTP request/response log format compatible with security tools.").size(10.0).color(TEXT_2));
+
+                if !filter_state.export_status_msg.is_empty() {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new(&filter_state.export_status_msg).size(11.0).color(ACCENT_GREEN).strong());
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(RichText::new("Close").size(11.0).color(TEXT_0)).clicked() {
+                            filter_state.show_export_modal = false;
+                        }
+                    });
+                });
+            });
+        filter_state.show_export_modal = is_open;
+    }
+
     action
 }
 
+// ── Helper to render a full-width selectable cell ────────────────────────────
 fn render_full_cell(
     ui: &mut egui::Ui,
-    text: RichText,
+    rich_text: RichText,
     is_selected: bool,
     entry: &HttpEntry,
     action: &mut TrafficAction,
     selected_id: &mut Option<usize>,
 ) {
-    let size = ui.available_size();
-    let resp = ui.add_sized(size, egui::SelectableLabel::new(is_selected, text));
-    if resp.clicked() {
+    let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
+
+    if is_selected {
+        ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(15, 65, 100));
+    } else if response.hovered() {
+        ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(32, 36, 48));
+    }
+
+    ui.allocate_ui_at_rect(rect, |ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            ui.label(rich_text);
+        });
+    });
+
+    if response.clicked() {
         *selected_id = Some(entry.id as usize);
     }
-    add_row_context_menu(&resp, entry, action, selected_id);
-}
 
-fn add_row_context_menu(
-    response: &egui::Response,
-    entry: &HttpEntry,
-    action: &mut TrafficAction,
-    selected_id: &mut Option<usize>,
-) {
-    let entry_id = entry.id as usize;
     response.context_menu(|ui| {
-        *selected_id = Some(entry_id);
         if ui.button("🚀 Send to Repeater").clicked() {
-            action.send_to_repeater = Some(entry_id);
+            action.send_to_repeater = Some(entry.id as usize);
             ui.close_menu();
         }
+        ui.separator();
         if ui.button("📋 Copy URL").clicked() {
             ui.output_mut(|o| o.copied_text = entry.url.clone());
             ui.close_menu();

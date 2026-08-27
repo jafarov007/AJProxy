@@ -11,7 +11,7 @@ use wry::{ProxyConfig, ProxyEndpoint, WebViewBuilder};
 /// by executing `ajproxy --internal-browser <proxy_port>`.
 /// This avoids event loop conflicts with eframe and requires NO external browsers installed.
 pub fn launch_embedded_browser(proxy_port: u16, initial_url: Option<&str>) -> Result<(), String> {
-    let url = initial_url.unwrap_or("https://httpbin.org/get");
+    let url = initial_url.unwrap_or("https://jafarov007.github.io/");
 
     println!("[AJProxy] Attempting to spawn sandboxed browser (Chrome/Chromium/Firefox) with zero-config SSL trust...");
     if let Ok(_) = spawn_fallback_browser(proxy_port, url) {

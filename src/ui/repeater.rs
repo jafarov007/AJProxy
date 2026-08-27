@@ -28,12 +28,12 @@ pub fn render(ui: &mut egui::Ui, tabs: &mut Vec<RepeaterTab>, active_tab: &mut u
     if tabs.is_empty() {
         tabs.push(RepeaterTab {
             name: "Tab 1".into(),
-            target_host: "httpbin.org".into(),
+            target_host: "jafarov007.github.io".into(),
             target_port: "443".into(),
             protocol: "HTTP/1.1".into(),
             is_tls: true,
-            request: "GET /get HTTP/1.1\r\nHost: httpbin.org\r\nAccept: application/json\r\n".into(),
-            request_text: "GET /get HTTP/1.1\r\nHost: httpbin.org\r\nAccept: application/json\r\n".into(),
+            request: "GET / HTTP/1.1\r\nHost: jafarov007.github.io\r\nAccept: text/html\r\n".into(),
+            request_text: "GET / HTTP/1.1\r\nHost: jafarov007.github.io\r\nAccept: text/html\r\n".into(),
             response: String::new(),
             response_text: String::new(),
             response_headers: String::new(),

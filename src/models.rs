@@ -53,6 +53,9 @@ pub struct FilterState {
     pub status_max: u16,
     pub path_filter: String,
     pub protocol_filter: String,
+    pub show_export_modal: bool,
+    pub export_status_msg: String,
+    pub export_path: String,
 }
 
 impl Default for FilterState {
@@ -66,6 +69,9 @@ impl Default for FilterState {
             status_max: 999,
             path_filter: String::new(),
             protocol_filter: "ALL".to_string(),
+            show_export_modal: false,
+            export_status_msg: String::new(),
+            export_path: String::new(),
         }
     }
 }
@@ -74,6 +80,7 @@ impl Default for FilterState {
 pub struct TrafficAction {
     pub send_to_repeater: Option<usize>,
     pub send_to_bruteforce: Option<usize>,
+    pub clear_history: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -113,6 +120,22 @@ pub struct InterceptState {
     pub current_request: String,
     pub queue_count: usize,
     pub match_rules: Vec<InterceptRule>,
+    pub show_rules_modal: bool,
+    pub selected_paused_id: Option<u32>,
+}
+
+impl Default for InterceptState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            current_entry: None,
+            current_request: String::new(),
+            queue_count: 0,
+            match_rules: vec![],
+            show_rules_modal: false,
+            selected_paused_id: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -230,6 +253,9 @@ pub struct AppSettings {
     pub ca_cert_path: String,
     pub listeners: Vec<ProxyListenerConfig>,
     pub cert_status_msg: String,
+    pub filter_scripts_styles_fonts: bool,
+    pub filter_images_media: bool,
+    pub filter_noisy_domains: bool,
 }
 
 impl Default for AppSettings {
@@ -242,7 +268,7 @@ impl Default for AppSettings {
             tls_enabled: true,
             protocol_preference: "Auto".into(),
             intercept_requests: true,
-            intercept_responses: true,
+            intercept_responses: false,
             passthrough_hosts: "*.google.com, *.gstatic.com".into(),
             ca_cert_path: "~/.ajproxy/ca.crt".into(),
             listeners: vec![
@@ -262,6 +288,9 @@ impl Default for AppSettings {
                 },
             ],
             cert_status_msg: String::new(),
+            filter_scripts_styles_fonts: true,
+            filter_images_media: true,
+            filter_noisy_domains: true,
         }
     }
 }
@@ -275,6 +304,83 @@ impl AppSettings {
             self.listen_address = first.bind_address.clone();
             self.listen_port = first.bind_port;
         }
+    }
+
+    pub fn is_filtered_noise(&self, url: &str, path: &str, content_type: &str) -> bool {
+        let url_lower = url.to_lowercase();
+        let path_lower = path.to_lowercase();
+        let ct_lower = content_type.to_lowercase();
+
+        // Helper to strip query string and hash fragment for exact file extension matching
+        let clean_path = path_lower.split('?').next().unwrap_or(&path_lower);
+        let clean_path = clean_path.split('#').next().unwrap_or(clean_path);
+
+        // 1. Checkbox 1: Filter CSS, JS, and Fonts (.js, .mjs, .cjs, .css, .woff, .woff2, .ttf | text/css, font/*, javascript)
+        if self.filter_scripts_styles_fonts {
+            if clean_path.ends_with(".js")
+                || clean_path.ends_with(".mjs")
+                || clean_path.ends_with(".cjs")
+                || clean_path.ends_with(".css")
+                || clean_path.ends_with(".woff")
+                || clean_path.ends_with(".woff2")
+                || clean_path.ends_with(".ttf")
+                || clean_path.ends_with(".otf")
+                || clean_path.ends_with(".eot")
+                || path_lower.contains(".js?")
+                || path_lower.contains(".js#")
+                || path_lower.contains(".css?")
+                || path_lower.contains(".css#")
+                || ct_lower.contains("javascript")
+                || ct_lower.contains("text/css")
+                || ct_lower.contains("ecmascript")
+                || ct_lower.starts_with("font/")
+            {
+                return true;
+            }
+        }
+
+        // 2. Checkbox 2: Filter Images & Media Icons (.png, .jpg, .jpeg, .gif, .svg, .ico | image/*)
+        if self.filter_images_media {
+            if clean_path.ends_with(".png")
+                || clean_path.ends_with(".jpg")
+                || clean_path.ends_with(".jpeg")
+                || clean_path.ends_with(".gif")
+                || clean_path.ends_with(".svg")
+                || clean_path.ends_with(".ico")
+                || clean_path.ends_with(".webp")
+                || path_lower.contains(".png?")
+                || path_lower.contains(".jpg?")
+                || path_lower.contains(".jpeg?")
+                || path_lower.contains(".gif?")
+                || path_lower.contains(".svg?")
+                || path_lower.contains(".ico?")
+                || ct_lower.starts_with("image/")
+            {
+                return true;
+            }
+        }
+
+        // 3. Checkbox 3: Filter Cloudflare Challenges, Google & Yandex Noisy Domains
+        if self.filter_noisy_domains {
+            if url_lower.contains("challenges.cloudflare.com")
+                || url_lower.contains("google.")
+                || url_lower.contains("googleapis.")
+                || url_lower.contains("gstatic.")
+                || url_lower.contains("googletagmanager.")
+                || url_lower.contains("google-analytics.")
+                || url_lower.contains("googlesyndication.")
+                || url_lower.contains("googleadservices.")
+                || url_lower.contains(".google")
+                || url_lower.contains("yandex.")
+                || url_lower.contains("yastatic.")
+                || url_lower.contains("mc.yandex")
+                || url_lower.contains(".yandex")
+            {
+                return true;
+            }
+        }
+
+        false
     }
 }
 

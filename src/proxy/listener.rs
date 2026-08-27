@@ -1,7 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -9,124 +8,12 @@ use openssl::x509::X509;
 use openssl::pkey::PKey;
 use openssl::ssl::{SslMethod, SslAcceptor};
 
-use crate::models::{HttpEntry, InterceptRule};
+use crate::models::HttpEntry;
 use crate::proxy::cert;
 
-static NEXT_ID: AtomicU32 = AtomicU32::new(1);
-static INTERCEPT_ENABLED: AtomicBool = AtomicBool::new(false); // DEFAULT OFF!
-
-pub fn set_intercept_enabled(enabled: bool) {
-    INTERCEPT_ENABLED.store(enabled, Ordering::SeqCst);
-}
-
-pub fn is_intercept_enabled() -> bool {
-    INTERCEPT_ENABLED.load(Ordering::SeqCst)
-}
-
-pub enum InterceptDecision {
-    Forward,
-    Drop,
-}
-
-#[derive(Clone)]
-pub struct PendingIntercept {
-    pub id: u32,
-    pub method: String,
-    pub host: String,
-    pub path: String,
-    pub url: String,
-    pub headers: String,
-    pub body: String,
-    pub responder: Arc<Mutex<Option<Sender<InterceptDecision>>>>,
-}
-
-lazy_static::lazy_static! {
-    pub static ref TRAFFIC_STORE: Arc<Mutex<Vec<HttpEntry>>> = Arc::new(Mutex::new(Vec::new()));
-    pub static ref PENDING_INTERCEPTS: Arc<Mutex<Vec<PendingIntercept>>> = Arc::new(Mutex::new(Vec::new()));
-    pub static ref MATCH_REPLACE_RULES: Arc<Mutex<Vec<InterceptRule>>> = Arc::new(Mutex::new(Vec::new()));
-    pub static ref UPSTREAM_AGENT: ureq::Agent = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout(std::time::Duration::from_secs(30))
-        .max_idle_connections(200)
-        .max_idle_connections_per_host(20)
-        .build();
-}
-
-pub fn update_match_rules(rules: Vec<InterceptRule>) {
-    if let Ok(mut lock) = MATCH_REPLACE_RULES.lock() {
-        *lock = rules;
-    }
-}
-
-pub fn apply_match_replace_rules(mut headers: String, mut body: String) -> (String, String) {
-    if let Ok(rules) = MATCH_REPLACE_RULES.lock() {
-        for rule in rules.iter() {
-            if rule.enabled && !rule.pattern.is_empty() {
-                match rule.match_type.as_str() {
-                    "Header" => {
-                        headers = headers.replace(&rule.pattern, &rule.action);
-                    }
-                    "Request Body" => {
-                        body = body.replace(&rule.pattern, &rule.action);
-                    }
-                    "URL / Path" => {
-                        headers = headers.replace(&rule.pattern, &rule.action);
-                    }
-                    _ => {
-                        headers = headers.replace(&rule.pattern, &rule.action);
-                        body = body.replace(&rule.pattern, &rule.action);
-                    }
-                }
-            }
-        }
-    }
-    (headers, body)
-}
-
-pub fn push_captured_entry(entry: HttpEntry) {
-    if let Ok(mut store) = TRAFFIC_STORE.lock() {
-        store.push(entry);
-    }
-}
-
-pub fn get_captured_entries() -> Vec<HttpEntry> {
-    if let Ok(store) = TRAFFIC_STORE.lock() {
-        store.clone()
-    } else {
-        Vec::new()
-    }
-}
-
-pub fn get_pending_intercepts() -> Vec<PendingIntercept> {
-    if let Ok(lock) = PENDING_INTERCEPTS.lock() {
-        lock.clone()
-    } else {
-        Vec::new()
-    }
-}
-
-pub fn resolve_pending_intercept(id: u32, decision: InterceptDecision) {
-    let mut sender_opt = None;
-    if let Ok(mut lock) = PENDING_INTERCEPTS.lock() {
-        if let Some(pos) = lock.iter().position(|p| p.id == id) {
-            let item = lock.remove(pos);
-            let responder = item.responder.clone();
-            if let Ok(mut s_lock) = responder.lock() {
-                sender_opt = s_lock.take();
-            };
-        }
-    }
-    if let Some(sender) = sender_opt {
-        let _ = sender.send(decision);
-    }
-}
-
-#[allow(dead_code)]
-pub fn clear_traffic_store() {
-    if let Ok(mut store) = TRAFFIC_STORE.lock() {
-        store.clear();
-    }
-}
+// Re-export store and filters for 100% backward compatibility
+pub use super::store::*;
+pub use super::filters::*;
 
 /// Helper function to read a full HTTP request (headers + body) from a stream.
 /// It reads the headers first, parses the Content-Length, and then reads the exact remaining body bytes.
@@ -285,7 +172,7 @@ fn handle_client_connection(mut client_stream: TcpStream) {
         let _ = client_stream.write_all(http_response.as_bytes());
 
         push_captured_entry(HttpEntry {
-            id: NEXT_ID.fetch_add(1, Ordering::SeqCst),
+            id: next_entry_id(),
             timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
             method: "GET".to_string(),
             host: "127.0.0.1:8080".to_string(),
@@ -386,7 +273,7 @@ fn process_and_send_response(
     let path = parsed_url.as_ref().map(|u| u.path()).unwrap_or(raw_path).to_string();
 
     push_captured_entry(HttpEntry {
-        id: NEXT_ID.fetch_add(1, Ordering::SeqCst),
+        id: next_entry_id(),
         timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
         method: method.to_string(),
         host,
@@ -418,10 +305,8 @@ fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str, _s
 
     let target_host = target.split(':').next().unwrap_or(target).to_string();
 
-    // ── Direct TCP Passthrough for Video streaming CDNs & heavy media ──
-    let is_passthrough = target_host.contains("googlevideo.com")
-        || target_host.contains("gvt1.com")
-        || target_host.contains("ytimg.com");
+    // ── Direct TCP Passthrough for Video streaming CDNs & user-configured SSL passthrough hosts ──
+    let is_passthrough = is_passthrough_domain(&target_host);
 
     if is_passthrough {
         let ack = "HTTP/1.1 200 Connection Established\r\nProxy-Agent: AJProxy/0.1\r\n\r\n";
@@ -539,9 +424,9 @@ fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str, _s
         };
 
         // ── PAUSE IF INTERCEPT IS ON! ─────────────────────────────────────
-        if is_intercept_enabled() {
+        if is_intercept_enabled() && !is_filtered_noise_request(&full_url, raw_path, &req_headers) {
             let (tx, rx) = channel();
-            let entry_id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+            let entry_id = next_entry_id();
 
             let pending = PendingIntercept {
                 id: entry_id,
@@ -679,9 +564,9 @@ fn forward_http_request(mut client_stream: TcpStream, req_headers: &str, req_bod
                 let path = parsed_url.as_ref().map(|u| u.path()).unwrap_or(raw_url).to_string();
 
                 // ── PAUSE IF INTERCEPT IS ON! ─────────────────────────────────────
-                if is_intercept_enabled() {
+                if is_intercept_enabled() && !is_filtered_noise_request(&full_url, &path, &req_headers) {
                     let (tx, rx) = channel();
-                    let entry_id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+                    let entry_id = next_entry_id();
 
                     let pending = PendingIntercept {
                         id: entry_id,
@@ -795,7 +680,7 @@ fn forward_http_request(mut client_stream: TcpStream, req_headers: &str, req_bod
                     let _ = client_stream.write_all(&body_bytes);
 
                     push_captured_entry(HttpEntry {
-                        id: NEXT_ID.fetch_add(1, Ordering::SeqCst),
+                        id: next_entry_id(),
                         timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
                         method: method.to_string(),
                         host,

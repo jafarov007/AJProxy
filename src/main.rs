@@ -15,7 +15,7 @@ fn main() -> eframe::Result<()> {
     // Check if invoked in --internal-browser mode (spawns WRY native webview)
     if args.len() >= 3 && args[1] == "--internal-browser" {
         let port: u16 = args[2].parse().unwrap_or(8080);
-        let target_url = if args.len() >= 4 { &args[3] } else { "https://httpbin.org/get" };
+        let target_url = if args.len() >= 4 { &args[3] } else { "https://jafarov007.github.io/" };
         browser::webview::run_internal_browser_process(port, target_url);
         return Ok(());
     }
