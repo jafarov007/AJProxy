@@ -139,19 +139,42 @@ fn handle_client_connection(mut client_stream: TcpStream) {
         return;
     }
 
+    // Handle Direct Download of Root CA Certificate (/cert, /cert.pem, /ca.crt)
+    if (request_str.starts_with("GET /cert ")
+        || request_str.starts_with("GET /cert.pem ")
+        || request_str.starts_with("GET /ca.crt ")
+        || request_str.starts_with("GET /download-ca "))
+        && (request_str.contains("Host: 127.0.0.1") || request_str.contains("Host: localhost") || request_str.contains("Host: ajproxy"))
+    {
+        let _ = cert::ensure_ca_cert_exists();
+        let cert_bytes = std::fs::read(cert::get_cert_path()).unwrap_or_default();
+        let http_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-x509-ca-cert\r\nContent-Disposition: attachment; filename=\"ajproxy_ca.crt\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            cert_bytes.len()
+        );
+        let mut full_resp = http_response.into_bytes();
+        full_resp.extend_from_slice(&cert_bytes);
+        let _ = client_stream.write_all(&full_resp);
+        return;
+    }
+
     // Handle Direct Proxy Welcome / Status Page
-    if request_str.starts_with("GET / ") && (request_str.contains("Host: 127.0.0.1") || request_str.contains("Host: localhost")) {
+    if request_str.starts_with("GET / ") && (request_str.contains("Host: 127.0.0.1") || request_str.contains("Host: localhost") || request_str.contains("Host: ajproxy")) {
         let response_body = r#"<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
     <title>AJProxy — Interceptor Active</title>
     <style>
-        body { font-family: system-ui, sans-serif; background: #121214; color: #60a5fa; text-align: center; padding-top: 100px; }
-        .card { background: #161820; border: 1px solid #025096; padding: 40px; display: inline-block; border-radius: 12px; max-width: 600px; }
-        h1 { color: #4ade80; margin-bottom: 10px; }
-        p { color: #94a3b8; font-size: 14px; }
-        .badge { background: #063464; color: #38bdf8; padding: 6px 12px; border-radius: 6px; font-family: monospace; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f111a; color: #60a5fa; text-align: center; padding-top: 80px; margin: 0; }
+        .card { background: #161824; border: 1px solid #1e293b; padding: 40px; display: inline-block; border-radius: 16px; max-width: 620px; box-shadow: 0 20px 40px rgba(0,0,0,0.5); }
+        h1 { color: #4ade80; margin-bottom: 12px; font-size: 24px; }
+        p { color: #94a3b8; font-size: 14px; line-height: 1.6; }
+        .badge { background: #0f2942; color: #38bdf8; padding: 6px 14px; border-radius: 6px; font-family: monospace; border: 1px solid #0284c7; }
+        .btn-container { margin-top: 26px; }
+        .btn { display: inline-block; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 600; font-size: 14px; transition: all 0.2s ease; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3); }
+        .btn:hover { background: linear-gradient(135deg, #059669 0%, #047857 100%); transform: translateY(-1px); box-shadow: 0 6px 16px rgba(16, 185, 129, 0.4); }
+        .note { margin-top: 18px; font-size: 12px; color: #64748b; }
     </style>
 </head>
 <body>
@@ -159,6 +182,10 @@ fn handle_client_connection(mut client_stream: TcpStream) {
         <h1>✔ AJProxy Interceptor Active</h1>
         <p>Your browser is successfully proxied through AJProxy on <span class="badge">127.0.0.1:8080</span>.</p>
         <p>All HTTP/HTTPS requests are being recorded and intercepted in real-time.</p>
+        <div class="btn-container">
+            <a href="/cert" class="btn">📥 Download Root CA Certificate (ajproxy_ca.crt)</a>
+        </div>
+        <p class="note">Install this Root CA into your browser or operating system to enable zero-warning HTTPS interception.</p>
     </div>
 </body>
 </html>"#;
