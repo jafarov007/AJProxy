@@ -187,8 +187,9 @@ pub fn install_root_ca_to_nss_db() {
             return;
         }
 
-        let empty_pass_file = "/tmp/ajproxy_empty_pass.txt";
-        let _ = fs::write(empty_pass_file, "\n");
+        let empty_pass_path = std::env::temp_dir().join("ajproxy_empty_pass.txt");
+        let empty_pass_file = empty_pass_path.to_str().unwrap_or("/tmp/ajproxy_empty_pass.txt");
+        let _ = fs::write(&empty_pass_path, "\n");
 
         if let Some(home_dir) = home::home_dir() {
             // 1. Chrome / Chromium NSS DB (~/.pki/nssdb)
