@@ -45,6 +45,17 @@ pub struct PendingIntercept {
     pub responder: Arc<Mutex<Option<Sender<InterceptDecision>>>>,
 }
 
+#[derive(Clone)]
+pub struct PendingWsFrame {
+    pub id: u64,
+    pub connection_id: u32,
+    pub direction: crate::models::WsDirection,
+    pub opcode: crate::models::WsOpcode,
+    pub payload: String,
+    pub payload_bytes: Vec<u8>,
+    pub responder: Arc<Mutex<Option<Sender<Option<crate::proxy::websocket::protocol::WsRawFrame>>>>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct NoiseFilterFlags {
     pub filter_scripts_styles_fonts: bool,
@@ -71,12 +82,21 @@ lazy_static::lazy_static! {
     pub static ref PASSTHROUGH_HOSTS: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref WS_CONNECTIONS: Arc<Mutex<Vec<WsConnection>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref WS_FRAMES: Arc<Mutex<Vec<WsFrameEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    pub static ref PENDING_WS_FRAMES: Arc<Mutex<Vec<PendingWsFrame>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref UPSTREAM_AGENT: ureq::Agent = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout(std::time::Duration::from_secs(30))
         .max_idle_connections(200)
         .max_idle_connections_per_host(20)
         .build();
+}
+
+pub fn update_ws_conn_status(conn_id: u32, new_status: &str) {
+    if let Ok(mut lock) = WS_CONNECTIONS.lock() {
+        if let Some(conn) = lock.iter_mut().find(|c| c.id == conn_id) {
+            conn.status = new_status.to_string();
+        }
+    }
 }
 
 pub fn push_ws_connection(conn: WsConnection) {
