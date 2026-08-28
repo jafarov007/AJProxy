@@ -25,6 +25,7 @@ pub struct AJProxyApp {
     pub decoder_state: DecoderState,
     pub comparer_state: ComparerState,
     pub sitemap_nodes: Vec<SiteMapNode>,
+    pub sitemap_search: String,
     pub modules_list: Vec<ModuleInfo>,
     pub settings: AppSettings,
 }
@@ -94,6 +95,7 @@ impl AJProxyApp {
                 sync_scroll: true,
             },
             sitemap_nodes: vec![],
+            sitemap_search: "".into(),
             modules_list: vec![],
             settings: AppSettings::default(),
         }
@@ -315,6 +317,7 @@ impl App for AJProxyApp {
                 Tab::SiteMap => sitemap::render(
                     ui,
                     &mut self.sitemap_nodes,
+                    &mut self.sitemap_search,
                 ),
                 Tab::Modules => modules::render(ui, &mut self.modules_list),
                 Tab::Settings => settings::render(ui, &mut self.settings),
