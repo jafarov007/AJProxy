@@ -1,7 +1,10 @@
 pub mod cert;
+pub mod cert_installer;
 pub mod filters;
+pub mod forwarder;
 pub mod http_stream;
 pub mod listener;
+pub mod mitm;
 pub mod repeater_engine;
 pub mod store;
 pub mod websocket;
