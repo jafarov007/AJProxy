@@ -303,10 +303,10 @@ fn truncate_intercept_str(s: &str, max_chars: usize) -> String {
 
                 // Section 3: Match & Replace Rules Table
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Match & Replace Rules").size(12.0).color(ACCENT_CYAN).strong());
+                    ui.label(RichText::new("Match & Replace Rules (Global Settings)").size(12.0).color(ACCENT_CYAN).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button(RichText::new("+ Add Match Rule").size(11.0).color(ACCENT_BLUE)).clicked() {
-                            state.match_rules.push(InterceptRule {
+                            settings.match_rules.push(InterceptRule {
                                 enabled: true,
                                 match_type: "Header".into(),
                                 pattern: "".into(),
@@ -321,11 +321,11 @@ fn truncate_intercept_str(s: &str, max_chars: usize) -> String {
                     .id_source("modal_rules_scroll")
                     .max_height(160.0)
                     .show(ui, |ui| {
-                        if state.match_rules.is_empty() {
+                        if settings.match_rules.is_empty() {
                             ui.label(RichText::new("No active Match & Replace rules defined.").size(11.0).color(TEXT_2));
                         } else {
                             let mut to_delete = None;
-                            for (idx, rule) in state.match_rules.iter_mut().enumerate() {
+                            for (idx, rule) in settings.match_rules.iter_mut().enumerate() {
                                 ui.horizontal(|ui| {
                                     ui.checkbox(&mut rule.enabled, "");
                                     ui.label(RichText::new("Match:").size(11.0).color(TEXT_2));
@@ -341,12 +341,12 @@ fn truncate_intercept_str(s: &str, max_chars: usize) -> String {
                                 });
                             }
                             if let Some(idx) = to_delete {
-                                state.match_rules.remove(idx);
+                                settings.match_rules.remove(idx);
                             }
                         }
                     });
 
-                listener::update_match_rules(state.match_rules.clone());
+                listener::update_match_rules(settings.match_rules.clone());
 
                 ui.add_space(12.0);
                 ui.separator();

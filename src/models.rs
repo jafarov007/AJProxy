@@ -264,6 +264,7 @@ pub struct AppSettings {
     pub filter_scripts_styles_fonts: bool,
     pub filter_images_media: bool,
     pub filter_noisy_domains: bool,
+    pub match_rules: Vec<InterceptRule>,
 }
 
 impl Default for AppSettings {
@@ -299,6 +300,7 @@ impl Default for AppSettings {
             filter_scripts_styles_fonts: true,
             filter_images_media: true,
             filter_noisy_domains: true,
+            match_rules: vec![],
         }
     }
 }

@@ -261,5 +261,88 @@ pub fn render(ui: &mut egui::Ui, settings: &mut AppSettings) {
                     "Filter Cloudflare & Google Noisy Domains (challenges.cloudflare.com, *.google.com)",
                 );
             });
+
+            ui.add_space(8.0);
+
+            // ── Section 4: Global Match & Replace Engine ────────────────────────
+            section_frame().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Global Match & Replace Engine").size(13.0).color(TEXT_0).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(
+                            egui::Button::new(RichText::new("➕ Add Match & Replace Rule").size(11.0).color(TEXT_0).strong())
+                                .fill(ACCENT_BLUE)
+                                .rounding(Rounding::same(4.0))
+                        ).clicked() {
+                            settings.match_rules.push(InterceptRule {
+                                enabled: true,
+                                match_type: "Header".into(),
+                                pattern: "".into(),
+                                action: "".into(),
+                            });
+                        }
+                    });
+                });
+                ui.label(RichText::new("Automatically rewrite matching request/response headers, paths, or body content on the fly across all proxy traffic.").size(11.0).color(TEXT_2));
+                ui.separator();
+                ui.add_space(4.0);
+
+                if settings.match_rules.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("No Match & Replace rules configured. Click '+ Add Match & Replace Rule' above to create one.").size(11.0).color(TEXT_2));
+                    ui.add_space(8.0);
+                } else {
+                    let mut to_delete = None;
+                    let mut changed = false;
+
+                    for (idx, rule) in settings.match_rules.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut rule.enabled, "").changed() {
+                                changed = true;
+                            }
+
+                            // Match Scope Combo
+                            egui::ComboBox::from_id_source(format!("match_type_combo_{}", idx))
+                                .selected_text(&rule.match_type)
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_value(&mut rule.match_type, "Header".into(), "Header").changed() { changed = true; }
+                                    if ui.selectable_value(&mut rule.match_type, "Request Body".into(), "Request Body").changed() { changed = true; }
+                                    if ui.selectable_value(&mut rule.match_type, "URL / Path".into(), "URL / Path").changed() { changed = true; }
+                                    if ui.selectable_value(&mut rule.match_type, "Anywhere".into(), "Anywhere").changed() { changed = true; }
+                                });
+
+                            ui.label(RichText::new("Match:").size(11.0).color(TEXT_1).strong());
+                            if ui.add(egui::TextEdit::singleline(&mut rule.pattern).hint_text("Pattern to find...").desired_width(170.0)).changed() {
+                                changed = true;
+                            }
+
+                            ui.label(RichText::new("Replace:").size(11.0).color(TEXT_1).strong());
+                            if ui.add(egui::TextEdit::singleline(&mut rule.action).hint_text("Replacement text...").desired_width(170.0)).changed() {
+                                changed = true;
+                            }
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(
+                                    egui::Button::new(RichText::new("✖").size(11.0).color(ACCENT_RED))
+                                        .fill(BG_RAISED)
+                                        .stroke(Stroke::new(0.5_f32, BORDER))
+                                ).clicked() {
+                                    to_delete = Some(idx);
+                                }
+                            });
+                        });
+                        ui.add_space(3.0);
+                    }
+
+                    if let Some(idx) = to_delete {
+                        settings.match_rules.remove(idx);
+                        changed = true;
+                    }
+
+                    if changed {
+                        crate::proxy::listener::update_match_rules(settings.match_rules.clone());
+                    }
+                }
+            });
         });
 }
