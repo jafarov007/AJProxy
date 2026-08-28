@@ -105,12 +105,17 @@ pub fn push_ws_connection(conn: WsConnection) {
     }
 }
 
+const MAX_STORE_ENTRIES: usize = 5000;
+
 pub fn push_ws_frame(frame: WsFrameEntry) {
     if let Ok(mut lock) = WS_FRAMES.lock() {
         if let Ok(mut conns) = WS_CONNECTIONS.lock() {
             if let Some(conn) = conns.iter_mut().find(|c| c.id == frame.connection_id) {
                 conn.message_count += 1;
             }
+        }
+        if lock.len() >= MAX_STORE_ENTRIES {
+            lock.drain(0..1000);
         }
         lock.push(frame);
     }
@@ -163,6 +168,9 @@ pub fn update_header_injection_rules(rules: Vec<HeaderInjectionRule>) {
 
 pub fn push_captured_entry(entry: HttpEntry) {
     if let Ok(mut store) = TRAFFIC_STORE.lock() {
+        if store.len() >= MAX_STORE_ENTRIES {
+            store.drain(0..1000);
+        }
         store.push(entry);
     }
 }
