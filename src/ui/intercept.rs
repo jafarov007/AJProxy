@@ -153,16 +153,25 @@ pub fn render(
                                 }
                             });
 
+fn truncate_intercept_str(s: &str, max_chars: usize) -> String {
+    if s.chars().count() > max_chars {
+        let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
+        format!("{}...", truncated)
+    } else {
+        s.to_string()
+    }
+}
+
                             // Col 3: Host
                             row.col(|ui| {
-                                if let Some(act) = render_paused_cell(ui, RichText::new(&item.host).size(11.0).color(TEXT_1), is_selected, item, state) {
+                                if let Some(act) = render_paused_cell(ui, RichText::new(truncate_intercept_str(&item.host, 28)).size(11.0).color(TEXT_1), is_selected, item, state) {
                                     ui_action = act;
                                 }
                             });
 
                             // Col 4: Path
                             row.col(|ui| {
-                                if let Some(act) = render_paused_cell(ui, RichText::new(&item.path).size(11.0).color(TEXT_2), is_selected, item, state) {
+                                if let Some(act) = render_paused_cell(ui, RichText::new(truncate_intercept_str(&item.path, 45)).size(11.0).color(TEXT_2), is_selected, item, state) {
                                     ui_action = act;
                                 }
                             });
@@ -371,6 +380,8 @@ fn render_paused_cell(
     } else if response.hovered() {
         ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(32, 36, 48));
     }
+
+    let response = response.on_hover_text(&item.url);
 
     ui.allocate_ui_at_rect(rect, |ui| {
         ui.horizontal(|ui| {

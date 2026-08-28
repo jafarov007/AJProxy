@@ -103,6 +103,15 @@ pub fn render(
                             let entry_id = entry.id as usize;
                             let is_selected = *selected_id == Some(entry_id);
 
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    if s.chars().count() > max_chars {
+        let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
+        format!("{}...", truncated)
+    } else {
+        s.to_string()
+    }
+}
+
                             // Col 1: ID
                             row.col(|ui| {
                                 render_full_cell(ui, RichText::new(format!("#{}", entry.id)).size(11.0).color(TEXT_2), is_selected, entry, &mut action, selected_id);
@@ -123,23 +132,25 @@ pub fn render(
 
                             // Col 3: Host
                             row.col(|ui| {
-                                render_full_cell(ui, RichText::new(&entry.host).size(11.0).color(TEXT_1), is_selected, entry, &mut action, selected_id);
+                                render_full_cell(ui, RichText::new(truncate_str(&entry.host, 28)).size(11.0).color(TEXT_1), is_selected, entry, &mut action, selected_id);
                             });
 
                             // Col 4: Path
                             row.col(|ui| {
-                                render_full_cell(ui, RichText::new(&entry.path).size(11.0).color(TEXT_2), is_selected, entry, &mut action, selected_id);
+                                render_full_cell(ui, RichText::new(truncate_str(&entry.path, 45)).size(11.0).color(TEXT_2), is_selected, entry, &mut action, selected_id);
                             });
 
-                            // Col 5: Status
+                            // Col 5: Status Code
                             row.col(|ui| {
-                                let color = match entry.status_code {
-                                    200..=299 => ACCENT_GREEN,
-                                    300..=399 => ACCENT_CYAN,
-                                    400..=499 => ACCENT_AMBER,
-                                    _ => ACCENT_RED,
+                                let (color, text) = match entry.status_code {
+                                    100..=199 => (ACCENT_BLUE, entry.status_code.to_string()),
+                                    200..=299 => (ACCENT_GREEN, entry.status_code.to_string()),
+                                    300..=399 => (ACCENT_CYAN, entry.status_code.to_string()),
+                                    400..=499 => (ACCENT_AMBER, entry.status_code.to_string()),
+                                    500..=599 => (ACCENT_RED, entry.status_code.to_string()),
+                                    _ => (TEXT_2, if entry.status_code == 0 { "---".into() } else { entry.status_code.to_string() }),
                                 };
-                                render_full_cell(ui, RichText::new(entry.status_code.to_string()).size(11.0).color(color).strong(), is_selected, entry, &mut action, selected_id);
+                                render_full_cell(ui, RichText::new(text).size(11.0).color(color).strong().family(FontFamily::Monospace), is_selected, entry, &mut action, selected_id);
                             });
 
                             // Col 6: Size
@@ -335,6 +346,8 @@ fn render_full_cell(
     } else if response.hovered() {
         ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(32, 36, 48));
     }
+
+    let response = response.on_hover_text(&entry.url);
 
     ui.allocate_ui_at_rect(rect, |ui| {
         ui.horizontal(|ui| {

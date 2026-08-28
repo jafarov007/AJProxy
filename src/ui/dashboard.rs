@@ -46,11 +46,22 @@ pub fn render(ui: &mut egui::Ui, entries: &[HttpEntry], proxy_running: bool) {
                     .max_height(400.0)
                     .show(ui, |ui| {
                         for entry in entries.iter().rev().take(15) {
+                            let host_disp = if entry.host.chars().count() > 22 {
+                                format!("{}...", entry.host.chars().take(19).collect::<String>())
+                            } else {
+                                entry.host.clone()
+                            };
+                            let path_disp = if entry.path.chars().count() > 32 {
+                                format!("{}...", entry.path.chars().take(29).collect::<String>())
+                            } else {
+                                entry.path.clone()
+                            };
+
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(&entry.timestamp).size(10.0).color(TEXT_2).family(FontFamily::Monospace));
                                 ui.label(RichText::new(&entry.method).size(10.0).color(method_color(&entry.method)).strong().family(FontFamily::Monospace));
-                                ui.label(RichText::new(&entry.host).size(10.0).color(TEXT_0));
-                                ui.label(RichText::new(&entry.path).size(10.0).color(TEXT_1).family(FontFamily::Monospace));
+                                ui.label(RichText::new(&host_disp).size(10.0).color(TEXT_0)).on_hover_text(&entry.url);
+                                ui.label(RichText::new(&path_disp).size(10.0).color(TEXT_1).family(FontFamily::Monospace)).on_hover_text(&entry.url);
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.label(RichText::new(format!("{}", entry.status_code)).size(10.0).color(status_color(entry.status_code)).strong().family(FontFamily::Monospace));
                                 });
