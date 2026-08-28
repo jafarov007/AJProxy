@@ -10,7 +10,7 @@ use openssl::ssl::{SslAcceptor, SslMethod};
 use openssl::x509::X509;
 
 use crate::proxy::cert;
-use crate::proxy::filters::{apply_match_replace_rules, is_filtered_noise_request, is_passthrough_domain};
+use crate::proxy::filters::{apply_match_replace_rules, apply_header_injection_rules, is_filtered_noise_request, is_passthrough_domain};
 use crate::proxy::http_stream::{read_full_http_request, process_and_send_response};
 use crate::proxy::websocket::{is_websocket_upgrade, handle_tls_websocket_tunnel};
 use crate::proxy::store::*;
@@ -130,6 +130,7 @@ pub fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str
         };
         let req_body = String::from_utf8_lossy(&req_body_bytes).to_string();
         let (req_headers, req_body) = apply_match_replace_rules(req_headers, req_body);
+        let req_headers = apply_header_injection_rules(&target_host, req_headers);
 
         let first_line = req_headers.lines().next().unwrap_or("");
         let parts: Vec<&str> = first_line.split_whitespace().collect();
@@ -200,8 +201,8 @@ pub fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str
             }
         }
 
-        let send_res = if !req_body_bytes.is_empty() {
-            req.send_bytes(&req_body_bytes)
+        let send_res = if !req_body.is_empty() {
+            req.send_bytes(req_body.as_bytes())
         } else {
             req.call()
         };

@@ -35,7 +35,7 @@ pub enum Tab {
     Settings,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HeaderInjectionRule {
     pub enabled: bool,
     pub scope: String,
@@ -265,6 +265,7 @@ pub struct AppSettings {
     pub filter_images_media: bool,
     pub filter_noisy_domains: bool,
     pub match_rules: Vec<InterceptRule>,
+    pub header_injection_rules: Vec<HeaderInjectionRule>,
 }
 
 impl Default for AppSettings {
@@ -301,6 +302,7 @@ impl Default for AppSettings {
             filter_images_media: true,
             filter_noisy_domains: true,
             match_rules: vec![],
+            header_injection_rules: vec![],
         }
     }
 }

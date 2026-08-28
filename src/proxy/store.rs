@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use crate::models::{HttpEntry, InterceptRule};
+use crate::models::{HttpEntry, InterceptRule, HeaderInjectionRule};
 
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 static INTERCEPT_ENABLED: AtomicBool = AtomicBool::new(false); // DEFAULT OFF!
@@ -56,6 +56,7 @@ lazy_static::lazy_static! {
     pub static ref TRAFFIC_STORE: Arc<Mutex<Vec<HttpEntry>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref PENDING_INTERCEPTS: Arc<Mutex<Vec<PendingIntercept>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref MATCH_REPLACE_RULES: Arc<Mutex<Vec<InterceptRule>>> = Arc::new(Mutex::new(Vec::new()));
+    pub static ref HEADER_INJECTION_RULES: Arc<Mutex<Vec<HeaderInjectionRule>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref NOISE_FILTER_SETTINGS: Arc<Mutex<NoiseFilterFlags>> = Arc::new(Mutex::new(NoiseFilterFlags::default()));
     pub static ref PASSTHROUGH_HOSTS: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref UPSTREAM_AGENT: ureq::Agent = ureq::AgentBuilder::new()
@@ -85,6 +86,12 @@ pub fn update_noise_filter_settings(flags: NoiseFilterFlags) {
 
 pub fn update_match_rules(rules: Vec<InterceptRule>) {
     if let Ok(mut lock) = MATCH_REPLACE_RULES.lock() {
+        *lock = rules;
+    }
+}
+
+pub fn update_header_injection_rules(rules: Vec<HeaderInjectionRule>) {
+    if let Ok(mut lock) = HEADER_INJECTION_RULES.lock() {
         *lock = rules;
     }
 }

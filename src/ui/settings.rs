@@ -344,5 +344,96 @@ pub fn render(ui: &mut egui::Ui, settings: &mut AppSettings) {
                     }
                 }
             });
+
+            ui.add_space(8.0);
+
+            // ── Section 5: Automated Header Injection Engine ───────────────────
+            section_frame().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Automated Header Injection Engine").size(13.0).color(TEXT_0).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(
+                            egui::Button::new(RichText::new("➕ Add Header Rule").size(11.0).color(TEXT_0).strong())
+                                .fill(ACCENT_BLUE)
+                                .rounding(Rounding::same(4.0))
+                        ).clicked() {
+                            settings.header_injection_rules.push(HeaderInjectionRule {
+                                enabled: true,
+                                scope: "*".into(),
+                                header_name: "".into(),
+                                header_value: "".into(),
+                            });
+                        }
+                    });
+                });
+                ui.label(RichText::new("Automatically inject custom headers (e.g. X-Forwarded-For, X-Bounty-Key, Authorization) into outgoing requests.").size(11.0).color(TEXT_2));
+                ui.separator();
+                ui.add_space(4.0);
+
+                // Scope Info Callout
+                egui::Frame::none()
+                    .fill(BG_RAISED)
+                    .rounding(Rounding::same(4.0))
+                    .inner_margin(egui::Margin::same(6.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("💡 Scope / Target Filter Guide:").size(11.0).color(ACCENT_CYAN).strong());
+                        ui.label(RichText::new("• Type '*' to inject this header into ALL outgoing requests across all domains.").size(10.0).color(TEXT_1));
+                        ui.label(RichText::new("• Type a host keyword (e.g. 'target' or 'api.example.com') to inject only when request host matches.").size(10.0).color(TEXT_1));
+                    });
+
+                ui.add_space(6.0);
+
+                if settings.header_injection_rules.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("No header injection rules configured. Click '+ Add Header Rule' above to create one.").size(11.0).color(TEXT_2));
+                    ui.add_space(6.0);
+                } else {
+                    let mut to_delete = None;
+                    let mut changed = false;
+
+                    for (idx, rule) in settings.header_injection_rules.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut rule.enabled, "").changed() {
+                                changed = true;
+                            }
+
+                            ui.label(RichText::new("Target / Scope:").size(11.0).color(TEXT_1).strong());
+                            if ui.add(egui::TextEdit::singleline(&mut rule.scope).hint_text("* or domain...").desired_width(110.0)).changed() {
+                                changed = true;
+                            }
+
+                            ui.label(RichText::new("Header Name:").size(11.0).color(TEXT_1).strong());
+                            if ui.add(egui::TextEdit::singleline(&mut rule.header_name).hint_text("X-Bounty-Key...").desired_width(140.0)).changed() {
+                                changed = true;
+                            }
+
+                            ui.label(RichText::new("Value:").size(11.0).color(TEXT_1).strong());
+                            if ui.add(egui::TextEdit::singleline(&mut rule.header_value).hint_text("Header value...").desired_width(170.0)).changed() {
+                                changed = true;
+                            }
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(
+                                    egui::Button::new(RichText::new("✖").size(11.0).color(ACCENT_RED))
+                                        .fill(BG_RAISED)
+                                        .stroke(Stroke::new(0.5_f32, BORDER))
+                                ).clicked() {
+                                    to_delete = Some(idx);
+                                }
+                            });
+                        });
+                        ui.add_space(3.0);
+                    }
+
+                    if let Some(idx) = to_delete {
+                        settings.header_injection_rules.remove(idx);
+                        changed = true;
+                    }
+
+                    if changed {
+                        crate::proxy::listener::update_header_injection_rules(settings.header_injection_rules.clone());
+                    }
+                }
+            });
         });
 }

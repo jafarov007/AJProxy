@@ -4,7 +4,7 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::proxy::filters::{apply_match_replace_rules, is_filtered_noise_request};
+use crate::proxy::filters::{apply_match_replace_rules, apply_header_injection_rules, is_filtered_noise_request};
 use crate::proxy::http_stream::process_and_send_response;
 use crate::proxy::websocket::{is_websocket_upgrade, handle_plain_websocket_tunnel};
 use crate::proxy::store::*;
@@ -13,20 +13,22 @@ use crate::proxy::listener::UPSTREAM_AGENT;
 pub fn forward_http_request(mut client_stream: TcpStream, req_headers: &str, req_body: &str, start_time: Instant) {
     let (req_headers, req_body) = apply_match_replace_rules(req_headers.to_string(), req_body.to_string());
 
+    let mut host_header = String::new();
+    for line in req_headers.lines() {
+        if line.to_lowercase().starts_with("host:") {
+            if let Some((_, h)) = line.split_once(':') {
+                host_header = h.trim().to_string();
+            }
+        }
+    }
+
+    let req_headers = apply_header_injection_rules(&host_header, req_headers);
+
     if let Some(first_line) = req_headers.lines().next() {
         let parts: Vec<&str> = first_line.split_whitespace().collect();
         if parts.len() >= 2 {
             let method = parts[0].to_uppercase();
             let raw_url = parts[1];
-
-            let mut host_header = String::new();
-            for line in req_headers.lines() {
-                if line.to_lowercase().starts_with("host:") {
-                    if let Some((_, h)) = line.split_once(':') {
-                        host_header = h.trim().to_string();
-                    }
-                }
-            }
 
             let full_url = if raw_url.starts_with("http://") || raw_url.starts_with("https://") {
                 raw_url.to_string()

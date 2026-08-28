@@ -1,4 +1,4 @@
-use super::store::{MATCH_REPLACE_RULES, NOISE_FILTER_SETTINGS, PASSTHROUGH_HOSTS, NoiseFilterFlags};
+use super::store::{MATCH_REPLACE_RULES, HEADER_INJECTION_RULES, NOISE_FILTER_SETTINGS, PASSTHROUGH_HOSTS, NoiseFilterFlags};
 
 pub fn is_passthrough_domain(target_host: &str) -> bool {
     let host_lower = target_host.to_lowercase();
@@ -117,4 +117,44 @@ pub fn apply_match_replace_rules(mut headers: String, mut body: String) -> (Stri
         }
     }
     (headers, body)
+}
+
+/// Automatically inject custom HTTP headers into outgoing requests matching specific domains or all hosts (*).
+pub fn apply_header_injection_rules(target_host: &str, mut headers: String) -> String {
+    if let Ok(rules) = HEADER_INJECTION_RULES.lock() {
+        for rule in rules.iter() {
+            if rule.enabled && !rule.header_name.trim().is_empty() {
+                let scope = rule.scope.trim();
+                let matches_scope = scope == "*"
+                    || scope.is_empty()
+                    || target_host.to_lowercase().contains(&scope.to_lowercase());
+
+                if matches_scope {
+                    let header_line = format!("{}: {}", rule.header_name.trim(), rule.header_value.trim());
+                    let lower_name = rule.header_name.trim().to_lowercase();
+
+                    // Replace existing header or append new header line
+                    let mut lines: Vec<String> = headers.lines().map(|s| s.to_string()).collect();
+                    let mut found = false;
+                    for line in lines.iter_mut() {
+                        if line.to_lowercase().starts_with(&format!("{}:", lower_name)) {
+                            *line = header_line.clone();
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if !found {
+                        lines.push(header_line);
+                    }
+
+                    headers = lines.join("\r\n");
+                    if !headers.ends_with("\r\n\r\n") && !headers.ends_with("\n\n") {
+                        headers.push_str("\r\n");
+                    }
+                }
+            }
+        }
+    }
+    headers
 }

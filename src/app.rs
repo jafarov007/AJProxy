@@ -262,6 +262,8 @@ impl App for AJProxyApp {
                             }
                             req_full.push_str(&entry.request_body);
 
+                            let req_full = crate::proxy::filters::apply_header_injection_rules(&entry.host, req_full);
+
                             self.repeater_tabs.push(RepeaterTab {
                                 name: format!("Tab {}", self.repeater_tabs.len() + 1),
                                 target_host: entry.host.clone(),
@@ -283,6 +285,7 @@ impl App for AJProxyApp {
                 }
                 Tab::Intercept => {
                     if let intercept::InterceptUIAction::SendToRepeater(host, port, req_raw, is_tls) = intercept::render(ui, &mut self.intercept_state, &mut self.settings, ctx) {
+                        let req_raw = crate::proxy::filters::apply_header_injection_rules(&host, req_raw);
                         self.repeater_tabs.push(RepeaterTab {
                             name: format!("Tab {}", self.repeater_tabs.len() + 1),
                             target_host: host,
