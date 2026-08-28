@@ -26,6 +26,7 @@ lazy_static::lazy_static! {
         .build();
 }
 
+#[allow(dead_code)]
 pub fn is_proxy_running() -> bool {
     PROXY_RUNNING.load(Ordering::Relaxed)
 }

@@ -105,44 +105,41 @@ pub fn run_internal_browser_process(proxy_port: u16, target_url: &str) {
 }
 
 fn spawn_fallback_browser(proxy_port: u16, target_url: &str) -> Result<(), String> {
-    let profile_dir_str = if let Some(home_dir) = home::home_dir() {
+    let profile_dir = if let Some(home_dir) = home::home_dir() {
         home_dir.join(format!(".config/ajproxy/chrome_profile_{}", proxy_port))
-            .to_string_lossy()
-            .to_string()
     } else {
-        format!("/tmp/ajproxy_chrome_profile_{}", proxy_port)
+        std::env::temp_dir().join(format!("ajproxy_chrome_profile_{}", proxy_port))
     };
-    let path = std::path::Path::new(&profile_dir_str);
-    std::fs::create_dir_all(path).ok();
+    std::fs::create_dir_all(&profile_dir).ok();
+    let profile_dir_str = profile_dir.to_string_lossy().to_string();
 
     let proxy_arg = format!("127.0.0.1:{}", proxy_port);
 
-    let mut chrome_args = vec![
+    let common_args = vec![
         format!("--proxy-server={}", proxy_arg),
         format!("--user-data-dir={}", profile_dir_str),
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
         "--disable-quic".to_string(),
         "--disable-encrypted-client-hello".to_string(),
+        target_url.to_string(),
     ];
-    chrome_args.push(target_url.to_string());
-
-    let mut chromium_args = vec![
-        format!("--proxy-server={}", proxy_arg),
-        format!("--user-data-dir={}", profile_dir_str),
-        "--no-first-run".to_string(),
-        "--no-default-browser-check".to_string(),
-        "--disable-quic".to_string(),
-        "--disable-encrypted-client-hello".to_string(),
-    ];
-    chromium_args.push(target_url.to_string());
 
     let candidates: &[(&str, Vec<String>)] = &[
-        ("google-chrome", chrome_args.clone()),
-        ("chromium", chromium_args.clone()),
-        ("chromium-browser", chromium_args),
+        // Linux / Unix binaries
+        ("google-chrome", common_args.clone()),
+        ("chromium", common_args.clone()),
+        ("chromium-browser", common_args.clone()),
         ("firefox", vec![target_url.to_string()]),
         ("x-www-browser", vec![target_url.to_string()]),
+        // Windows binaries
+        ("chrome.exe", common_args.clone()),
+        ("msedge.exe", common_args.clone()),
+        ("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", common_args.clone()),
+        ("C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe", common_args.clone()),
+        ("C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", common_args.clone()),
+        // macOS binaries
+        ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", common_args.clone()),
     ];
 
     for (bin, args) in candidates {

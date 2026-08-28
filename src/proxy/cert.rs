@@ -115,7 +115,8 @@ pub fn install_ca_system_wide() -> Result<String, String> {
     ensure_ca_cert_exists().map_err(|e| e.to_string())?;
     let cert_path = get_cert_path();
 
-    if cfg!(target_os = "linux") {
+    #[cfg(target_os = "linux")]
+    {
         let cmd = format!(
             "pkexec sh -c 'cp \"{}\" /usr/local/share/ca-certificates/ajproxy_ca.crt && update-ca-certificates' || sudo cp \"{}\" /usr/local/share/ca-certificates/ajproxy_ca.crt && sudo update-ca-certificates",
             cert_path.display(), cert_path.display()
@@ -135,8 +136,39 @@ pub fn install_ca_system_wide() -> Result<String, String> {
                 Ok("✅ Root CA imported to browser databases!".to_string())
             }
         }
-    } else {
-        Err("System-wide auto-trust is currently supported on Linux/Ubuntu.".to_string())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let output = Command::new("certutil")
+            .args(&["-addstore", "-f", "ROOT", &cert_path.to_string_lossy()])
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                Ok("✅ Root CA successfully installed to Windows Root Certificate Store!".to_string())
+            }
+            _ => Err("Failed to import Root CA to Windows Store. Please run as Administrator or import manually.".to_string())
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("sudo")
+            .args(&["security", "add-trusted-cert", "-d", "-r", "trustRoot", "-k", "/Library/Keychains/System.keychain", &cert_path.to_string_lossy()])
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                Ok("✅ Root CA successfully installed to macOS System Keychain!".to_string())
+            }
+            _ => Err("Failed to import Root CA to macOS System Keychain.".to_string())
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        Err("System-wide auto-trust is not supported on this OS.".to_string())
     }
 }
 
