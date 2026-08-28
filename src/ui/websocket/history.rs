@@ -7,6 +7,9 @@ pub fn render(
     state: &mut WsHistoryState,
     connections: &[WsConnection],
     frames: &[WsFrameEntry],
+    repeater_tabs: &mut Vec<WsRepeaterTab>,
+    active_repeater_tab: &mut usize,
+    ws_sub_tab: &mut WsSubTab,
 ) {
     egui::SidePanel::left("ws_history_connections_panel")
         .default_width(260.0)
@@ -44,7 +47,7 @@ pub fn render(
                                 .inner_margin(egui::Margin::same(6.0))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        let status_color = if conn.status == "Active" { ACCENT_GREEN } else { TEXT_2 };
+                                        let status_color = if conn.status.starts_with("Active") { ACCENT_GREEN } else { TEXT_2 };
                                         ui.label(RichText::new("●").size(10.0).color(status_color));
 
                                         if ui.add(
@@ -176,22 +179,29 @@ pub fn render(
                                     for frame in &filtered_frames {
                                         let is_sel = state.selected_frame_id == Some(frame.id);
 
-                                        // ID
-                                        if ui.add(egui::SelectableLabel::new(is_sel, RichText::new(format!("{}", frame.id)).size(10.0).family(FontFamily::Monospace))).clicked() {
+                                        // Entire row click detection
+                                        let row_id_str = format!("{}", frame.id);
+
+                                        // ID Column
+                                        if ui.add(egui::SelectableLabel::new(is_sel, RichText::new(&row_id_str).size(10.0).family(FontFamily::Monospace))).clicked() {
                                             state.selected_frame_id = Some(frame.id);
                                         }
 
-                                        // Time
-                                        ui.label(RichText::new(&frame.timestamp).size(10.0).color(TEXT_2).family(FontFamily::Monospace));
+                                        // Time Column
+                                        if ui.add(egui::SelectableLabel::new(is_sel, RichText::new(&frame.timestamp).size(10.0).color(TEXT_2).family(FontFamily::Monospace))).clicked() {
+                                            state.selected_frame_id = Some(frame.id);
+                                        }
 
-                                        // Direction ⬆️ Client / ⬇️ Server
+                                        // Direction Column ⬆️ Client / ⬇️ Server
                                         let (dir_str, dir_color) = match frame.direction {
                                             WsDirection::ClientToServer => ("⬆️ Client", ACCENT_GREEN),
                                             WsDirection::ServerToClient => ("⬇️ Server", ACCENT_BLUE),
                                         };
-                                        ui.label(RichText::new(dir_str).size(10.0).color(dir_color).strong());
+                                        if ui.add(egui::SelectableLabel::new(is_sel, RichText::new(dir_str).size(10.0).color(dir_color).strong())).clicked() {
+                                            state.selected_frame_id = Some(frame.id);
+                                        }
 
-                                        // Opcode Badge
+                                        // Opcode Badge Column
                                         let (op_bg, op_fg) = match frame.opcode {
                                             WsOpcode::Text => (Color32::from_rgb(15, 40, 70), ACCENT_BLUE),
                                             WsOpcode::Binary => (Color32::from_rgb(45, 20, 65), Color32::from_rgb(192, 132, 252)),
@@ -200,24 +210,32 @@ pub fn render(
                                             _ => (BG_RAISED, TEXT_2),
                                         };
 
-                                        egui::Frame::none()
+                                        let op_btn = egui::Frame::none()
                                             .fill(op_bg)
                                             .rounding(Rounding::same(3.0))
                                             .inner_margin(egui::Margin::symmetric(5.0, 2.0))
                                             .show(ui, |ui| {
                                                 ui.label(RichText::new(frame.opcode.label()).size(9.0).color(op_fg).strong().family(FontFamily::Monospace));
-                                            });
+                                            }).response;
 
-                                        // Length
-                                        ui.label(RichText::new(format!("{} B", frame.length)).size(10.0).color(TEXT_2).family(FontFamily::Monospace));
+                                        if op_btn.clicked() {
+                                            state.selected_frame_id = Some(frame.id);
+                                        }
 
-                                        // Payload Preview
+                                        // Length Column
+                                        if ui.add(egui::SelectableLabel::new(is_sel, RichText::new(format!("{} B", frame.length)).size(10.0).color(TEXT_2).family(FontFamily::Monospace))).clicked() {
+                                            state.selected_frame_id = Some(frame.id);
+                                        }
+
+                                        // Payload Preview Column
                                         let preview = if frame.payload.len() > 70 {
                                             format!("{}...", &frame.payload[..70])
                                         } else {
                                             frame.payload.clone()
                                         };
-                                        ui.label(RichText::new(preview).size(10.0).color(TEXT_0).family(FontFamily::Monospace));
+                                        if ui.add(egui::SelectableLabel::new(is_sel, RichText::new(preview).size(10.0).color(TEXT_0).family(FontFamily::Monospace))).clicked() {
+                                            state.selected_frame_id = Some(frame.id);
+                                        }
 
                                         ui.end_row();
                                     }
@@ -241,6 +259,33 @@ pub fn render(
                     if ui.selectable_label(state.inspector_mode == idx, RichText::new(*mode_name).size(10.0)).clicked() {
                         state.inspector_mode = idx;
                     }
+                }
+
+                if let Some(frame) = selected_frame {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(
+                            egui::Button::new(RichText::new("🚀 Send to WS Repeater").size(11.0).color(TEXT_0).strong())
+                                .fill(ACCENT_BLUE)
+                                .rounding(Rounding::same(4.0))
+                        ).clicked() {
+                            let target_url = connections
+                                .iter()
+                                .find(|c| c.id == frame.connection_id)
+                                .map(|c| c.url.clone())
+                                .unwrap_or_else(|| "wss://echo.websocket.events".into());
+
+                            repeater_tabs.push(WsRepeaterTab {
+                                name: format!("WS Tab {}", repeater_tabs.len() + 1),
+                                target_url,
+                                is_connected: false,
+                                send_opcode: frame.opcode.clone(),
+                                payload_input: frame.payload.clone(),
+                                log_messages: vec![],
+                            });
+                            *active_repeater_tab = repeater_tabs.len() - 1;
+                            *ws_sub_tab = WsSubTab::Repeater;
+                        }
+                    });
                 }
             });
 

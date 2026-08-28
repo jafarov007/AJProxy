@@ -3,7 +3,7 @@ pub mod intercept;
 pub mod repeater_client;
 pub mod reassembly;
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -33,7 +33,7 @@ pub fn is_websocket_upgrade(req_headers: &str) -> bool {
 // ── TLS WebSocket Proxy Tunnel Handler ───────────────────────────────
 
 pub fn handle_tls_websocket_tunnel(
-    tls_stream: openssl::ssl::SslStream<TcpStream>,
+    mut tls_stream: openssl::ssl::SslStream<TcpStream>,
     target_host: &str,
     raw_path: &str,
     full_url: &str,
@@ -65,6 +65,17 @@ pub fn handle_tls_websocket_tunnel(
             }
             let _ = server_tls.flush();
 
+            // Read target server HTTP 101 response and forward to browser client
+            let mut handshake_buf = [0u8; 4096];
+            let mut resp_headers = String::new();
+            if let Ok(n) = server_tls.read(&mut handshake_buf) {
+                if n > 0 {
+                    let _ = tls_stream.write_all(&handshake_buf[..n]);
+                    let _ = tls_stream.flush();
+                    resp_headers = String::from_utf8_lossy(&handshake_buf[..n]).to_string();
+                }
+            }
+
             let conn_id = next_ws_conn_id();
 
             // Record HTTP 101 Switching Protocols
@@ -82,7 +93,11 @@ pub fn handle_tls_websocket_tunnel(
                 protocol: "HTTP/1.1".to_string(),
                 request_headers: req_headers.to_string(),
                 request_body: req_body.to_string(),
-                response_headers: "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n".to_string(),
+                response_headers: if resp_headers.is_empty() {
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n".to_string()
+                } else {
+                    resp_headers.clone()
+                },
                 response_body: format!("[WebSocket #{} Active Tunnel: {}]", conn_id, full_url),
             });
 
@@ -289,6 +304,16 @@ pub fn handle_plain_websocket_tunnel(
         }
         let _ = server_tcp.flush();
 
+        let mut handshake_buf = [0u8; 4096];
+        let mut resp_headers = String::new();
+        if let Ok(n) = server_tcp.read(&mut handshake_buf) {
+            if n > 0 {
+                let _ = client_stream.write_all(&handshake_buf[..n]);
+                let _ = client_stream.flush();
+                resp_headers = String::from_utf8_lossy(&handshake_buf[..n]).to_string();
+            }
+        }
+
         let conn_id = next_ws_conn_id();
 
         push_captured_entry(HttpEntry {
@@ -305,7 +330,11 @@ pub fn handle_plain_websocket_tunnel(
             protocol: "HTTP/1.1".to_string(),
             request_headers: req_headers.to_string(),
             request_body: req_body.to_string(),
-            response_headers: "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n".to_string(),
+            response_headers: if resp_headers.is_empty() {
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n".to_string()
+            } else {
+                resp_headers.clone()
+            },
             response_body: format!("[WebSocket #{} Active Tunnel: {}]", conn_id, full_url),
         });
 

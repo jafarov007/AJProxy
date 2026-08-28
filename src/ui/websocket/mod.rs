@@ -53,7 +53,15 @@ pub fn render(
     // ── Sub-Tab View Switching ───────────────────────────────────────
     match ws_sub_tab {
         WsSubTab::History => {
-            history::render(ui, history_state, ws_connections, ws_frames);
+            history::render(
+                ui,
+                history_state,
+                ws_connections,
+                ws_frames,
+                repeater_tabs,
+                active_repeater_tab,
+                ws_sub_tab,
+            );
         }
         WsSubTab::Intercept => {
             intercept::render(ui, intercept_state);
