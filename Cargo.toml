@@ -19,13 +19,15 @@ time = "0.3"
 rfd = "0.14"
 wry = "0.38"
 tao = "0.26"
-gtk = "0.18"
 tokio = { version = "1", features = ["full"] }
 ureq = "2.12"
 url = "2.5"
 lazy_static = "1.5"
 native-tls = "0.2"
-openssl = "0.10"
+openssl = { version = "0.10", features = ["vendored"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
 
 [profile.release]
 opt-level = 3
