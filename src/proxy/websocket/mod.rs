@@ -122,6 +122,7 @@ pub fn handle_tls_websocket_tunnel(
                             if frame.opcode_u8 == 0x8 {
                                 let (code, reason) = parse_close_code(&frame.payload);
                                 update_ws_conn_status(conn_id, &format!("Closed ({})", code));
+                                reassembler.clear_connection(conn_id);
 
                                 push_ws_frame(WsFrameEntry {
                                     id: next_ws_frame_id(),

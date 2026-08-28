@@ -5,10 +5,12 @@ use std::thread;
 use crate::models::{WsDirection, WsFrameEntry};
 use crate::proxy::websocket::protocol::{read_ws_frame, write_ws_frame, WsRawFrame};
 
+#[allow(dead_code)]
 pub struct WsRepeaterClientHandle {
     pub tx: Sender<WsRawFrame>,
 }
 
+#[allow(dead_code)]
 pub fn spawn_repeater_client(
     target_url: String,
     on_frame_received: impl Fn(WsFrameEntry) + Send + 'static,
