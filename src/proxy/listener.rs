@@ -1,406 +1,145 @@
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
-use openssl::x509::X509;
+
 use openssl::pkey::PKey;
-use openssl::ssl::{SslMethod, SslAcceptor};
+use openssl::ssl::{SslAcceptor, SslMethod};
+use openssl::x509::X509;
 
-use crate::models::HttpEntry;
 use crate::proxy::cert;
+use crate::proxy::filters::{apply_match_replace_rules, is_filtered_noise_request, is_passthrough_domain};
+use crate::proxy::http_stream::{read_full_http_request, process_and_send_response};
+use crate::proxy::websocket::{is_websocket_upgrade, handle_tls_websocket_tunnel, handle_plain_websocket_tunnel};
+pub use crate::proxy::store::*;
 
-// Re-export store and filters for 100% backward compatibility
-pub use super::store::*;
-pub use super::filters::*;
+static PROXY_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Helper function to read a full HTTP request (headers + body) from a stream.
-/// It reads the headers first, parses the Content-Length, and then reads the exact remaining body bytes.
-fn read_full_http_request<R: std::io::Read>(reader: &mut R) -> Result<(String, Vec<u8>), std::io::Error> {
-    let mut buffer = Vec::new();
-    let mut chunk = [0u8; 4096];
-    let mut header_end_pos = None;
-
-    // 1. Read until we find "\r\n\r\n"
-    loop {
-        let n = reader.read(&mut chunk)?;
-        if n == 0 {
-            break;
-        }
-        buffer.extend_from_slice(&chunk[..n]);
-        if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
-            header_end_pos = Some(pos);
-            break;
-        }
-    }
-
-    let pos = match header_end_pos {
-        Some(p) => p,
-        None => {
-            let headers = String::from_utf8_lossy(&buffer).to_string();
-            return Ok((headers, Vec::new()));
-        }
-    };
-
-    let headers_str = String::from_utf8_lossy(&buffer[..pos]).to_string();
-    let mut body_bytes = buffer[pos + 4..].to_vec();
-
-    // 2. Parse Content-Length and Transfer-Encoding
-    let mut content_length = 0;
-    let mut is_chunked = false;
-    for line in headers_str.lines() {
-        if let Some((k, v)) = line.split_once(':') {
-            let k = k.trim();
-            if k.eq_ignore_ascii_case("content-length") {
-                if let Ok(len) = v.trim().parse::<usize>() {
-                    content_length = len;
-                }
-            } else if k.eq_ignore_ascii_case("transfer-encoding") && v.trim().to_lowercase().contains("chunked") {
-                is_chunked = true;
-            }
-        }
-    }
-
-    // 3. Read the rest of the body if needed
-    if is_chunked {
-        while !body_bytes.windows(5).any(|w| w == b"0\r\n\r\n") {
-            let mut b = [0u8; 1024];
-            let n = reader.read(&mut b)?;
-            if n == 0 {
-                break;
-            }
-            body_bytes.extend_from_slice(&b[..n]);
-        }
-    } else if body_bytes.len() < content_length {
-        let mut remaining = content_length - body_bytes.len();
-        let mut body_chunk = vec![0u8; remaining.min(4096)];
-        while remaining > 0 {
-            let n = reader.read(&mut body_chunk)?;
-            if n == 0 {
-                break;
-            }
-            body_bytes.extend_from_slice(&body_chunk[..n]);
-            remaining -= n;
-            if remaining > 0 && body_chunk.len() > remaining {
-                body_chunk.resize(remaining, 0);
-            }
-        }
-    }
-
-    Ok((headers_str, body_bytes))
+lazy_static::lazy_static! {
+    static ref UPSTREAM_AGENT: ureq::Agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(60))
+        .max_idle_connections(100)
+        .max_idle_connections_per_host(10)
+        .build();
 }
 
-/// Helper function to split raw HTTP bytes into (headers, body)
-#[allow(dead_code)]
-fn parse_raw_http(raw_bytes: &[u8]) -> (String, String) {
-    if let Some(pos) = raw_bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-        let headers = String::from_utf8_lossy(&raw_bytes[..pos]).to_string();
-        let body = String::from_utf8_lossy(&raw_bytes[pos + 4..]).to_string();
-        (headers, body)
-    } else {
-        (String::from_utf8_lossy(raw_bytes).to_string(), String::new())
-    }
+pub fn is_proxy_running() -> bool {
+    PROXY_RUNNING.load(Ordering::Relaxed)
 }
 
-/// Starts a multithreaded TCP HTTP/HTTPS Proxy Listener on 127.0.0.1:<port>
-pub fn start_proxy_server(bind_addr: String, bind_port: u16) {
-    let address = format!("{}:{}", bind_addr, bind_port);
+pub fn start_proxy_server(host: String, port: u16) {
+    let addr = format!("{}:{}", host, port);
+    let _ = start_proxy_listener(&addr);
+}
+
+/// Starts the proxy listener on 127.0.0.1:8080
+pub fn start_proxy_listener(addr: &str) -> std::io::Result<()> {
+    let listener = TcpListener::bind(addr)?;
+    PROXY_RUNNING.store(true, Ordering::Relaxed);
+    println!("[AJProxy Engine] Listening on http://{}", addr);
 
     thread::spawn(move || {
-        let listener = match TcpListener::bind(&address) {
-            Ok(l) => {
-                println!("[AJProxy Listener] Successfully bound & listening on {}", address);
-                l
-            }
-            Err(e) => {
-                eprintln!("[AJProxy Listener] Error binding to {}: {}", address, e);
-                return;
-            }
-        };
-
         for stream in listener.incoming() {
+            if !PROXY_RUNNING.load(Ordering::Relaxed) {
+                break;
+            }
             match stream {
-                Ok(stream) => {
+                Ok(client_stream) => {
                     thread::spawn(move || {
-                        handle_client_connection(stream);
+                        handle_client(client_stream);
                     });
                 }
                 Err(e) => {
-                    eprintln!("[AJProxy Listener] Connection error: {}", e);
+                    eprintln!("[AJProxy Engine] Accept error: {}", e);
                 }
             }
         }
     });
+
+    Ok(())
 }
 
-fn handle_client_connection(mut client_stream: TcpStream) {
+fn handle_client(mut client_stream: TcpStream) {
     let start_time = Instant::now();
-    let _ = client_stream.set_read_timeout(Some(std::time::Duration::from_secs(15)));
-    let _ = client_stream.set_write_timeout(Some(std::time::Duration::from_secs(15)));
+
     let (req_headers, req_body_bytes) = match read_full_http_request(&mut client_stream) {
-        Ok(res) => res,
-        Err(_) => return,
+        Ok(res) if !res.0.is_empty() => res,
+        _ => return,
     };
     let req_body = String::from_utf8_lossy(&req_body_bytes).to_string();
-    let (req_headers, req_body) = apply_match_replace_rules(req_headers, req_body);
-    let request_str = &req_headers;
 
-    // Handle HTTPS CONNECT tunnel request with TLS MITM Decryption
-    if request_str.starts_with("CONNECT ") {
-        handle_https_connect_mitm(client_stream, request_str, start_time);
+    let first_line = req_headers.lines().next().unwrap_or("");
+
+    // ── HTTP / cert Root CA Download Route ─────────────────────────────────
+    if first_line.contains("GET /cert ") {
+        if let Ok(ca_pem) = std::fs::read_to_string(cert::get_cert_path()) {
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: application/x-pem-file\r\n\
+                 Content-Disposition: attachment; filename=\"ajproxy_ca.crt\"\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                ca_pem.len(),
+                ca_pem
+            );
+            let _ = client_stream.write_all(resp.as_bytes());
+        } else {
+            let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nRoot CA Certificate not found.";
+            let _ = client_stream.write_all(resp.as_bytes());
+        }
         return;
     }
 
-    // Handle Direct Download of Root CA Certificate (/cert, /cert.pem, /ca.crt)
-    if (request_str.starts_with("GET /cert ")
-        || request_str.starts_with("GET /cert.pem ")
-        || request_str.starts_with("GET /ca.crt ")
-        || request_str.starts_with("GET /download-ca "))
-        && (request_str.contains("Host: 127.0.0.1") || request_str.contains("Host: localhost") || request_str.contains("Host: ajproxy"))
-    {
-        let _ = cert::ensure_ca_cert_exists();
-        let cert_bytes = std::fs::read(cert::get_cert_path()).unwrap_or_default();
-        let http_response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/x-x509-ca-cert\r\nContent-Disposition: attachment; filename=\"ajproxy_ca.crt\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            cert_bytes.len()
-        );
-        let mut full_resp = http_response.into_bytes();
-        full_resp.extend_from_slice(&cert_bytes);
-        let _ = client_stream.write_all(&full_resp);
-        return;
-    }
+    // ── Local Interceptor Landing Page on 127.0.0.1:8080 ──────────────────
+    if first_line.contains("GET / HTTP/") && (req_headers.contains("Host: 127.0.0.1") || req_headers.contains("Host: localhost")) {
+        let cert_button = if cert::get_cert_path().exists() {
+            "<span class=\"badge green\">✔ Root CA Installed & Trusted</span>"
+        } else {
+            "<a href=\"/cert\" class=\"btn\">📥 Download & Install Root CA Certificate (.crt)</a>"
+        };
 
-    // Handle Direct Proxy Welcome / Status Page
-    if request_str.starts_with("GET / ") && (request_str.contains("Host: 127.0.0.1") || request_str.contains("Host: localhost") || request_str.contains("Host: ajproxy")) {
-        let response_body = r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>AJProxy — Interceptor Active</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f111a; color: #60a5fa; text-align: center; padding-top: 80px; margin: 0; }
-        .card { background: #161824; border: 1px solid #1e293b; padding: 40px; display: inline-block; border-radius: 16px; max-width: 620px; box-shadow: 0 20px 40px rgba(0,0,0,0.5); }
-        h1 { color: #4ade80; margin-bottom: 12px; font-size: 24px; }
-        p { color: #94a3b8; font-size: 14px; line-height: 1.6; }
-        .badge { background: #0f2942; color: #38bdf8; padding: 6px 14px; border-radius: 6px; font-family: monospace; border: 1px solid #0284c7; }
-        .btn-container { margin-top: 26px; }
-        .btn { display: inline-block; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 600; font-size: 14px; transition: all 0.2s ease; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3); }
-        .btn:hover { background: linear-gradient(135deg, #059669 0%, #047857 100%); transform: translateY(-1px); box-shadow: 0 6px 16px rgba(16, 185, 129, 0.4); }
-        .note { margin-top: 18px; font-size: 12px; color: #64748b; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h1>✔ AJProxy Interceptor Active</h1>
-        <p>Your browser is successfully proxied through AJProxy on <span class="badge">127.0.0.1:8080</span>.</p>
-        <p>All HTTP/HTTPS requests are being recorded and intercepted in real-time.</p>
-        <div class="btn-container">
-            <a href="/cert" class="btn">📥 Download Root CA Certificate (ajproxy_ca.crt)</a>
-        </div>
-        <p class="note">Install this Root CA into your browser or operating system to enable zero-warning HTTPS interception.</p>
-    </div>
-</body>
-</html>"#;
-
-        let http_response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            response_body.len(),
-            response_body
+        let html = format!(
+            "<!DOCTYPE html>\n<html>\n<head><title>AJProxy Interceptor Active</title>\n\
+            <style>\n\
+            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; text-align: center; padding: 60px 20px; }}\n\
+            .card {{ background: #1e293b; max-width: 580px; margin: 0 auto; padding: 40px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }}\n\
+            h1 {{ color: #38bdf8; font-size: 28px; margin-bottom: 12px; }}\n\
+            p {{ color: #94a3b8; font-size: 15px; line-height: 1.6; }}\n\
+            .status {{ inline-block; background: #0284c7; color: white; padding: 6px 14px; border-radius: 20px; font-weight: 600; font-size: 13px; margin: 15px 0; }}\n\
+            .btn {{ display: inline-block; background: #10b981; color: white; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 600; margin-top: 20px; transition: background 0.2s; }}\n\
+            .btn:hover {{ background: #059669; }}\n\
+            .badge {{ display: inline-block; padding: 8px 16px; border-radius: 6px; font-weight: 600; margin-top: 15px; }}\n\
+            .badge.green {{ background: #064e3b; color: #34d399; border: 1px solid #059669; }}\n\
+            </style></head>\n\
+            <body>\n\
+            <div class=\"card\">\n\
+            <h1>⚡ AJProxy Interceptor Active</h1>\n\
+            <div class=\"status\">PROXY LISTENER RUNNING</div>\n\
+            <p>Your browser traffic is being proxied through <strong>AJProxy (127.0.0.1:8080)</strong>.</p>\n\
+            <p>All HTTP/HTTPS requests are being recorded and intercepted in real-time.</p>\n\
+            <div style=\"margin-top: 25px;\">{}</div>\n\
+            </div>\n\
+            </body></html>",
+            cert_button
         );
 
-        let _ = client_stream.write_all(http_response.as_bytes());
-
-        push_captured_entry(HttpEntry {
-            id: next_entry_id(),
-            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-            method: "GET".to_string(),
-            host: "127.0.0.1:8080".to_string(),
-            path: "/".to_string(),
-            url: "http://127.0.0.1:8080/".to_string(),
-            status_code: 200,
-            content_type: "text/html".to_string(),
-            length: response_body.len(),
-            duration_ms: start_time.elapsed().as_millis() as u64,
-            protocol: "HTTP/1.1".to_string(),
-            request_headers: req_headers,
-            request_body: req_body,
-            response_headers: format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}", response_body.len()),
-            response_body: response_body.to_string(),
-        });
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            html.len(),
+            html
+        );
+        let _ = client_stream.write_all(resp.as_bytes());
         return;
     }
 
-    // Handle Plain HTTP Proxy Forwarding
-    forward_http_request(client_stream, &req_headers, &req_body, start_time);
-}
-
-/// Helper function to process response and forward to client with SSE & Streaming support
-fn process_and_send_response<W: std::io::Write>(
-    stream: &mut W,
-    resp: ureq::Response,
-    method: &str,
-    target_host: &str,
-    raw_path: &str,
-    full_url: &str,
-    req_headers: &str,
-    req_body: &str,
-    start_time: Instant,
-) {
-    let status = resp.status();
-    let content_type = resp.header("Content-Type").unwrap_or("text/html").to_string();
-
-    let status_str = match status {
-        200 => "OK",
-        201 => "Created",
-        202 => "Accepted",
-        204 => "No Content",
-        206 => "Partial Content",
-        301 => "Moved Permanently",
-        302 => "Found",
-        303 => "See Other",
-        304 => "Not Modified",
-        307 => "Temporary Redirect",
-        308 => "Permanent Redirect",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        409 => "Conflict",
-        500 => "Internal Server Error",
-        502 => "Bad Gateway",
-        503 => "Service Unavailable",
-        504 => "Gateway Timeout",
-        _ => "OK",
-    };
-
-    let is_sse = content_type.to_lowercase().contains("text/event-stream")
-        || content_type.to_lowercase().contains("application/stream+json")
-        || content_type.to_lowercase().contains("application/x-ndjson");
-
-    let is_chunked_upstream = resp.header("transfer-encoding").map(|v| v.to_lowercase().contains("chunked")).unwrap_or(false);
-    let is_large_content = resp.header("content-length").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0) > 5 * 1024 * 1024;
-
-    // Collect all response headers for logging
-    let mut resp_headers_str = format!("HTTP/1.1 {} {}\r\n", status, status_str);
-    let mut forwarded_headers = String::new();
-    for h_name in resp.headers_names() {
-        if let Some(h_val) = resp.header(&h_name) {
-            resp_headers_str.push_str(&format!("{}: {}\r\n", h_name, h_val));
-            if !h_name.eq_ignore_ascii_case("content-length")
-                && !h_name.eq_ignore_ascii_case("transfer-encoding")
-                && !h_name.eq_ignore_ascii_case("content-encoding")
-            {
-                forwarded_headers.push_str(&format!("{}: {}\r\n", h_name, h_val));
-            }
-        }
+    if first_line.starts_with("CONNECT ") {
+        handle_https_connect_mitm(client_stream, &req_headers, start_time);
+    } else {
+        forward_http_request(client_stream, &req_headers, &req_body, start_time);
     }
-
-    // ── REAL-TIME STREAMING MODE (SSE / AI LLM Chat / Large Media Downloads) ──
-    if is_sse || (is_chunked_upstream && is_large_content) {
-        let mut http_resp = format!("HTTP/1.1 {} {}\r\n", status, status_str);
-        http_resp.push_str(&forwarded_headers);
-        if is_sse {
-            http_resp.push_str("Cache-Control: no-cache\r\nConnection: keep-alive\r\n");
-        } else if is_chunked_upstream {
-            http_resp.push_str("Transfer-Encoding: chunked\r\n");
-        }
-        http_resp.push_str("\r\n");
-
-        let _ = stream.write_all(http_resp.as_bytes());
-        let _ = stream.flush();
-
-        let mut reader = resp.into_reader();
-        let mut buf = [0u8; 8192];
-        let mut captured_bytes = Vec::new();
-
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if is_chunked_upstream && !is_sse {
-                        let chunk_header = format!("{:x}\r\n", n);
-                        if stream.write_all(chunk_header.as_bytes()).is_err() { break; }
-                        if stream.write_all(&buf[..n]).is_err() { break; }
-                        if stream.write_all(b"\r\n").is_err() { break; }
-                    } else {
-                        if stream.write_all(&buf[..n]).is_err() { break; }
-                    }
-                    let _ = stream.flush();
-
-                    if captured_bytes.len() < 16384 {
-                        let take = n.min(16384 - captured_bytes.len());
-                        captured_bytes.extend_from_slice(&buf[..take]);
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-
-        if is_chunked_upstream && !is_sse {
-            let _ = stream.write_all(b"0\r\n\r\n");
-            let _ = stream.flush();
-        }
-
-        let parsed_url = url::Url::parse(full_url).ok();
-        let host = parsed_url.as_ref().and_then(|u| u.host_str()).unwrap_or(target_host).to_string();
-        let path = parsed_url.as_ref().map(|u| u.path()).unwrap_or(raw_path).to_string();
-
-        push_captured_entry(HttpEntry {
-            id: next_entry_id(),
-            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-            method: method.to_string(),
-            host,
-            path,
-            url: full_url.to_string(),
-            status_code: status,
-            content_type: content_type.clone(),
-            length: captured_bytes.len(),
-            duration_ms: start_time.elapsed().as_millis() as u64,
-            protocol: "HTTP/1.1".to_string(),
-            request_headers: req_headers.to_string(),
-            request_body: req_body.to_string(),
-            response_headers: resp_headers_str,
-            response_body: String::from_utf8_lossy(&captured_bytes).to_string(),
-        });
-        return;
-    }
-
-    // Standard Response Mode
-    let mut body_bytes = Vec::new();
-    let _ = resp.into_reader().read_to_end(&mut body_bytes);
-
-    let mut http_resp = format!("HTTP/1.1 {} {}\r\n", status, status_str);
-    http_resp.push_str(&forwarded_headers);
-    http_resp.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
-    http_resp.push_str("\r\n");
-
-    let _ = stream.write_all(http_resp.as_bytes());
-    let _ = stream.write_all(&body_bytes);
-    let _ = stream.flush();
-
-    let parsed_url = url::Url::parse(full_url).ok();
-    let host = parsed_url.as_ref().and_then(|u| u.host_str()).unwrap_or(target_host).to_string();
-    let path = parsed_url.as_ref().map(|u| u.path()).unwrap_or(raw_path).to_string();
-
-    push_captured_entry(HttpEntry {
-        id: next_entry_id(),
-        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-        method: method.to_string(),
-        host,
-        path,
-        url: full_url.to_string(),
-        status_code: status,
-        content_type: content_type.clone(),
-        length: body_bytes.len(),
-        duration_ms: start_time.elapsed().as_millis() as u64,
-        protocol: "HTTP/1.1".to_string(),
-        request_headers: req_headers.to_string(),
-        request_body: req_body.to_string(),
-        response_headers: resp_headers_str,
-        response_body: String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(16384)]).to_string(),
-    });
 }
 
 /// Full TLS MITM Interception Handler with HTTP Keep-Alive
@@ -417,10 +156,8 @@ fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str, _s
 
     let target_host = target.split(':').next().unwrap_or(target).to_string();
 
-    // ── Direct TCP Passthrough for Video streaming CDNs & user-configured SSL passthrough hosts ──
-    let is_passthrough = is_passthrough_domain(&target_host);
-
-    if is_passthrough {
+    // ── Direct TCP Passthrough for Video streaming CDNs & SSL passthrough hosts ──
+    if is_passthrough_domain(&target_host) {
         let ack = "HTTP/1.1 200 Connection Established\r\nProxy-Agent: AJProxy/0.1\r\n\r\n";
         if client_stream.write_all(ack.as_bytes()).is_err() {
             return;
@@ -565,105 +302,12 @@ fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str, _s
             }
         }
 
-        let is_websocket = req_headers.lines().any(|l| {
-            if let Some((k, v)) = l.split_once(':') {
-                let k = k.trim().to_lowercase();
-                let v = v.trim().to_lowercase();
-                (k == "upgrade" && v.contains("websocket")) || (k == "connection" && v.contains("upgrade"))
-            } else {
-                false
+        // ── WebSocket Upgrade Handling ────────────────────────────────────
+        if is_websocket_upgrade(&req_headers) {
+            if handle_tls_websocket_tunnel(tls_stream, &target_host, raw_path, &full_url, &method, &req_headers, &req_body, &req_body_bytes, request_start) {
+                return;
             }
-        });
-
-        if is_websocket {
-            let mut connector_builder = match openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls()) {
-                Ok(b) => b,
-                Err(_) => break,
-            };
-            connector_builder.set_verify(openssl::ssl::SslVerifyMode::NONE);
-            let connector = connector_builder.build();
-
-            let target_addr = if target_host.contains(':') {
-                target_host.clone()
-            } else {
-                format!("{}:443", target_host)
-            };
-
-            if let Ok(server_tcp) = TcpStream::connect(&target_addr) {
-                if let Ok(mut server_tls) = connector.connect(&target_host, server_tcp) {
-                    let _ = server_tls.write_all(req_headers.as_bytes());
-                    let _ = server_tls.write_all(b"\r\n\r\n");
-                    if !req_body_bytes.is_empty() {
-                        let _ = server_tls.write_all(&req_body_bytes);
-                    }
-                    let _ = server_tls.flush();
-
-                    push_captured_entry(HttpEntry {
-                        id: next_entry_id(),
-                        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                        method: method.to_string(),
-                        host: target_host.clone(),
-                        path: raw_path.to_string(),
-                        url: full_url.clone(),
-                        status_code: 101,
-                        content_type: "websocket".to_string(),
-                        length: 0,
-                        duration_ms: request_start.elapsed().as_millis() as u64,
-                        protocol: "HTTP/1.1".to_string(),
-                        request_headers: req_headers.to_string(),
-                        request_body: req_body.to_string(),
-                        response_headers: "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n".to_string(),
-                        response_body: "[WebSocket Bidirectional Tunnel Active]".to_string(),
-                    });
-
-                    let client_arc = Arc::new(Mutex::new(tls_stream));
-                    let server_arc = Arc::new(Mutex::new(server_tls));
-
-                    let c_clone = Arc::clone(&client_arc);
-                    let s_clone = Arc::clone(&server_arc);
-
-                    let h1 = thread::spawn(move || {
-                        let mut buf = [0u8; 8192];
-                        loop {
-                            let n = match c_clone.lock() {
-                                Ok(mut c) => match c.read(&mut buf) {
-                                    Ok(0) => break,
-                                    Ok(n) => n,
-                                    Err(_) => break,
-                                },
-                                Err(_) => break,
-                            };
-                            if let Ok(mut s) = s_clone.lock() {
-                                if s.write_all(&buf[..n]).is_err() { break; }
-                                let _ = s.flush();
-                            } else {
-                                break;
-                            }
-                        }
-                    });
-
-                    let mut buf = [0u8; 8192];
-                    loop {
-                        let n = match server_arc.lock() {
-                            Ok(mut s) => match s.read(&mut buf) {
-                                Ok(0) => break,
-                                Ok(n) => n,
-                                Err(_) => break,
-                            },
-                            Err(_) => break,
-                        };
-                        if let Ok(mut c) = client_arc.lock() {
-                            if c.write_all(&buf[..n]).is_err() { break; }
-                            let _ = c.flush();
-                        } else {
-                            break;
-                        }
-                    }
-
-                    let _ = h1.join();
-                    return;
-                }
-            }
+            break;
         }
 
         let mut req = UPSTREAM_AGENT.request(&method, &full_url);
@@ -697,49 +341,24 @@ fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str, _s
             }
             Err(e) => {
                 let err_str = e.to_string();
-                // Suppress spam for known-noisy Chrome background services, DNS failures & ad trackers
                 let is_noisy = full_url.contains("android.clients.google.com/checkin")
                     || full_url.contains("clients1.google.com")
                     || full_url.contains("clients2.google.com")
                     || full_url.contains("update.googleapis.com")
                     || full_url.contains("localhost.sensic.net")
-                    || full_url.contains("omnitagjs.com")
-                    || full_url.contains("presage.io")
-                    || full_url.contains("rubiconproject.com")
-                    || full_url.contains("play.google.com/log")
-                    || full_url.contains("cspreport")
-                    || full_url.contains("spotxchange.com")
-                    || full_url.contains("bluekai.com")
-                    || full_url.contains("addthis.com")
-                    || full_url.contains("lkqd.net")
-                    || full_url.contains("iqzone.com")
-                    || full_url.contains("colossusssp.com")
-                    || full_url.contains("stickyadstv.com")
-                    || full_url.contains("yieldmo.com")
-                    || full_url.contains("mathtag.com")
-                    || full_url.contains("drift-pixel.ai")
-                    || full_url.contains("gammaplatform.com")
-                    || full_url.contains("yandex.net")
-                    || full_url.contains("amitydigital.io")
-                    || full_url.contains("rtb-oveeo.com")
-                    || full_url.contains("googlevideo.com")
-                    || err_str.contains("HTTP version")
-                    || err_str.contains("Name or service not known")
-                    || err_str.contains("Connection refused");
+                    || full_url.contains("omnitagjs.com");
+
                 if !is_noisy {
-                    eprintln!("[AJProxy MITM] Upstream error: {} → {}", full_url, e);
+                    eprintln!("[AJProxy MITM] Upstream request failed for {}: {}", full_url, err_str);
                 }
-                // Send 502 to browser and keep the loop alive
-                let error_body = "502 Bad Gateway";
-                let error_resp = format!(
-                    "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-                    error_body.len(), error_body
+
+                let err_resp = format!(
+                    "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nAJProxy Upstream Error: {}",
+                    err_str
                 );
-                if tls_stream.write_all(error_resp.as_bytes()).is_err() {
-                    break; // Browser connection dead
-                }
+                let _ = tls_stream.write_all(err_resp.as_bytes());
                 let _ = tls_stream.flush();
-                continue; // Keep loop alive for next request
+                break;
             }
         }
     }
@@ -806,57 +425,9 @@ fn forward_http_request(mut client_stream: TcpStream, req_headers: &str, req_bod
                     }
                 }
 
-                let is_websocket = req_headers.lines().any(|l| {
-                    if let Some((k, v)) = l.split_once(':') {
-                        let k = k.trim().to_lowercase();
-                        let v = v.trim().to_lowercase();
-                        (k == "upgrade" && v.contains("websocket")) || (k == "connection" && v.contains("upgrade"))
-                    } else {
-                        false
-                    }
-                });
-
-                if is_websocket {
-                    let target_addr = if host.contains(':') { host.clone() } else { format!("{}:80", host) };
-                    if let Ok(mut server_tcp) = TcpStream::connect(&target_addr) {
-                        let _ = server_tcp.write_all(req_headers.as_bytes());
-                        let _ = server_tcp.write_all(b"\r\n\r\n");
-                        if !req_body.is_empty() {
-                            let _ = server_tcp.write_all(req_body.as_bytes());
-                        }
-                        let _ = server_tcp.flush();
-
-                        push_captured_entry(HttpEntry {
-                            id: next_entry_id(),
-                            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                            method: method.to_string(),
-                            host: host.clone(),
-                            path: path.clone(),
-                            url: full_url.clone(),
-                            status_code: 101,
-                            content_type: "websocket".to_string(),
-                            length: 0,
-                            duration_ms: start_time.elapsed().as_millis() as u64,
-                            protocol: "HTTP/1.1".to_string(),
-                            request_headers: req_headers.to_string(),
-                            request_body: req_body.to_string(),
-                            response_headers: "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n".to_string(),
-                            response_body: "[WebSocket Bidirectional Tunnel Active]".to_string(),
-                        });
-
-                        let mut client_clone = match client_stream.try_clone() {
-                            Ok(c) => c,
-                            Err(_) => return,
-                        };
-                        let mut server_clone = match server_tcp.try_clone() {
-                            Ok(s) => s,
-                            Err(_) => return,
-                        };
-
-                        thread::spawn(move || {
-                            let _ = std::io::copy(&mut client_clone, &mut server_clone);
-                        });
-                        let _ = std::io::copy(&mut server_tcp, &mut client_stream);
+                // ── Plain HTTP WebSocket Upgrade Handling ────────────────────────
+                if is_websocket_upgrade(&req_headers) {
+                    if handle_plain_websocket_tunnel(&mut client_stream, &host, &path, &full_url, &method, &req_headers, &req_body, start_time) {
                         return;
                     }
                 }
