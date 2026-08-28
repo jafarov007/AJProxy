@@ -12,12 +12,12 @@ It features a modern graphical user interface powered by egui, enabling security
 
 - **Built with Rust**: Inherits Rust's high performance, thread safety, and sub-millisecond network execution speed.
 - **Multi-Listener Proxying**: Configure multiple ports and binding interfaces with support for HTTP/1.1, HTTP/2, and automatic protocol detection.
-- **Real-Time Interception**: Intercept and modify HTTP/HTTPS requests and responses on the fly.
-- **Traffic Noise & Asset Filtering**: Toggleable, pre-configured noise filters in Settings (enabled by default) to keep Dashboard, Intercept, and HTTP History completely clean:
-  - **CSS, JS & Fonts**: Hides `.css`, `.js`, `.woff`, `.woff2`, `.ttf` files and `text/css`, `font/*`, `javascript` headers.
-  - **Images & Media**: Hides `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.ico` files and `image/*` headers.
-  - **Noisy Domains & Telemetry**: Hides `challenges.cloudflare.com`, `*.google.com`, `gstatic.com`, and ad-sync trackers.
-- **Dynamic SSL/TLS MITM Decryption**: Automatically generates a 365-day compliant Root CA. Offers one-click automatic CA trust installation for Linux/Ubuntu systems and major browsers (Chrome/Firefox).
+- **Real-Time Interception**: Intercept and modify HTTP/HTTPS requests and responses on the fly with one-click **Send to Repeater** functionality.
+- **Advanced Traffic & Noise Filtering**:
+  - **Host Filter Modal**: Wildcard & substring domain filtering (e.g., `*target*`, `api.example.com`) to isolate target application scope.
+  - **Zero-Byte Suppression**: One-click toggle to suppress 0-length responses (e.g. 204 No Content, empty preflight packets) from HTTP History logs.
+  - **Pre-Configured Asset Filtering**: Hides `.css`, `.js`, `.png`, `.jpg`, `.gif`, `.svg`, `.ico`, `.woff2`, as well as Cloudflare challenges and Google telemetry.
+- **Dynamic SSL/TLS MITM & CA Management**: Automatically generates 365-day compliant Root CA certificates with one-click automatic CA trust installation and cleanup for system/browser trust stores.
 - **Direct TCP Media Passthrough**: Zero-overhead passthrough for video streaming CDNs (`googlevideo.com`, `gvt1.com`, `ytimg.com`) ensuring 4K video streaming without buffering.
 - **Security Testing Toolkit**: Includes tools such as Dashboard, Repeater, Sitemap, Comparer, Decoder, Traffic viewer, and Intruder/Bruteforce modules.
 

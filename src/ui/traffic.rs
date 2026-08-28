@@ -89,35 +89,38 @@ pub fn render(
                 filter_state.export_status_msg = String::new();
             }
 
+            // Top Right: Send to Repeater Button (Always visible!)
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(id) = *selected_id {
-                    if entries.iter().any(|e| e.id as usize == id) {
-                        if ui.button(RichText::new("🚀 Send to Repeater").size(11.0).color(ACCENT_GREEN)).clicked() {
-                            action.send_to_repeater = Some(id);
-                        }
+                let has_sel = selected_id.is_some() && entries.iter().any(|e| selected_id.map(|id| e.id as usize == id).unwrap_or(false));
+                let btn_color = if has_sel { ACCENT_GREEN } else { TEXT_2 };
+                if ui.add_enabled(has_sel, egui::Button::new(RichText::new("🚀 Send to Repeater").size(11.0).color(btn_color))).clicked() {
+                    if let Some(id) = *selected_id {
+                        action.send_to_repeater = Some(id);
                     }
                 }
             });
         });
         ui.add_space(4.0);
 
-        // ── Action Bar / Filter Controls (Under Send to Repeater) ─────────────
+        // ── Action Bar / Filter Controls (Directly under Send to Repeater) ────
         ui.horizontal(|ui| {
-            // Checkbox: Hide 0-byte responses (Size = 0) - Default: UNCHECKED
-            ui.checkbox(&mut filter_state.hide_zero_size, RichText::new("🚫 Hide 0-byte responses (Size = 0)").size(11.0).color(TEXT_1));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Right-most: Add Host Filter Button (Directly under Send to Repeater)
+                let filter_btn_label = if filter_state.host_filters.is_empty() {
+                    "➕ Add Host Filter".to_string()
+                } else {
+                    format!("🎯 Host Filters ({} Active)", filter_state.host_filters.len())
+                };
 
-            ui.add_space(12.0);
+                if ui.button(RichText::new(filter_btn_label).size(11.0).color(if filter_state.host_filters.is_empty() { ACCENT_BLUE } else { ACCENT_AMBER })).clicked() {
+                    filter_state.show_host_filter_modal = true;
+                }
 
-            // Button: Add Host Filter
-            let filter_btn_label = if filter_state.host_filters.is_empty() {
-                "➕ Add Host Filter".to_string()
-            } else {
-                format!("🎯 Host Filters ({} Active)", filter_state.host_filters.len())
-            };
+                ui.add_space(12.0);
 
-            if ui.button(RichText::new(filter_btn_label).size(11.0).color(if filter_state.host_filters.is_empty() { ACCENT_BLUE } else { ACCENT_AMBER })).clicked() {
-                filter_state.show_host_filter_modal = true;
-            }
+                // Sol tarafında: Checkbox (Hide 0-byte responses)
+                ui.checkbox(&mut filter_state.hide_zero_size, RichText::new("🚫 Hide 0-byte responses (Size = 0)").size(11.0).color(TEXT_1));
+            });
         });
         ui.add_space(4.0);
 
