@@ -56,6 +56,10 @@ pub struct FilterState {
     pub show_export_modal: bool,
     pub export_status_msg: String,
     pub export_path: String,
+    pub hide_zero_size: bool,
+    pub show_host_filter_modal: bool,
+    pub host_filters: Vec<String>,
+    pub new_host_filter_input: String,
 }
 
 impl Default for FilterState {
@@ -72,6 +76,10 @@ impl Default for FilterState {
             show_export_modal: false,
             export_status_msg: String::new(),
             export_path: String::new(),
+            hide_zero_size: false,
+            show_host_filter_modal: false,
+            host_filters: Vec::new(),
+            new_host_filter_input: String::new(),
         }
     }
 }

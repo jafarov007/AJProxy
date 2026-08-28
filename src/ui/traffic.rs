@@ -32,11 +32,48 @@ pub fn render(
 ) -> TrafficAction {
     let mut action = TrafficAction::default();
 
+    // ── Filter Captured Entries ───────────────────────────────────────────────
+    let filtered_entries: Vec<&HttpEntry> = entries
+        .iter()
+        .filter(|e| {
+            // 1. Hide zero-size response packets if checkbox enabled
+            if filter_state.hide_zero_size && e.length == 0 {
+                return false;
+            }
+
+            // 2. Host Filters (wildcard/substring search e.g. "target" matches *target*)
+            if !filter_state.host_filters.is_empty() {
+                let host_lower = e.host.to_lowercase();
+                let matches_host = filter_state.host_filters.iter().any(|filter| {
+                    host_lower.contains(&filter.to_lowercase())
+                });
+                if !matches_host {
+                    return false;
+                }
+            }
+
+            // 3. Search query filter
+            if !filter_state.search_query.is_empty() {
+                let q = filter_state.search_query.to_lowercase();
+                let matches_q = e.host.to_lowercase().contains(&q)
+                    || e.url.to_lowercase().contains(&q)
+                    || e.method.to_lowercase().contains(&q)
+                    || e.request_headers.to_lowercase().contains(&q)
+                    || e.response_headers.to_lowercase().contains(&q);
+                if !matches_q {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .collect();
+
     ui.vertical(|ui| {
         // ── Top Toolbar ───────────────────────────────────────────────────────
         ui.horizontal(|ui| {
             ui.label(RichText::new("HTTP HISTORY").size(14.0).color(ACCENT_CYAN).strong());
-            ui.label(RichText::new(format!("({} captured)", entries.len())).size(11.0).color(TEXT_2));
+            ui.label(RichText::new(format!("({}/{} shown)", filtered_entries.len(), entries.len())).size(11.0).color(TEXT_2));
             
             ui.add_space(10.0);
 
@@ -61,6 +98,26 @@ pub fn render(
                     }
                 }
             });
+        });
+        ui.add_space(4.0);
+
+        // ── Action Bar / Filter Controls (Under Send to Repeater) ─────────────
+        ui.horizontal(|ui| {
+            // Checkbox: Hide 0-byte responses (Size = 0) - Default: UNCHECKED
+            ui.checkbox(&mut filter_state.hide_zero_size, RichText::new("🚫 Hide 0-byte responses (Size = 0)").size(11.0).color(TEXT_1));
+
+            ui.add_space(12.0);
+
+            // Button: Add Host Filter
+            let filter_btn_label = if filter_state.host_filters.is_empty() {
+                "➕ Add Host Filter".to_string()
+            } else {
+                format!("🎯 Host Filters ({} Active)", filter_state.host_filters.len())
+            };
+
+            if ui.button(RichText::new(filter_btn_label).size(11.0).color(if filter_state.host_filters.is_empty() { ACCENT_BLUE } else { ACCENT_AMBER })).clicked() {
+                filter_state.show_host_filter_modal = true;
+            }
         });
         ui.add_space(4.0);
 
@@ -97,9 +154,9 @@ pub fn render(
                         header.col(|ui| { ui.label(RichText::new("Time").size(11.0).color(TEXT_2).strong()); });
                     })
                     .body(|body| {
-                        body.rows(20.0, entries.len(), |mut row| {
+                        body.rows(20.0, filtered_entries.len(), |mut row| {
                             let index = row.index();
-                            let entry = &entries[entries.len() - 1 - index]; // latest first
+                            let entry = filtered_entries[filtered_entries.len() - 1 - index]; // latest first
                             let entry_id = entry.id as usize;
                             let is_selected = *selected_id == Some(entry_id);
 
@@ -325,6 +382,78 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
                 });
             });
         filter_state.show_export_modal = is_open;
+    }
+
+    // ── Host Filter Configuration Modal Dialog Window ─────────────────────────
+    if filter_state.show_host_filter_modal {
+        let mut is_open = filter_state.show_host_filter_modal;
+        egui::Window::new(RichText::new("🎯 Host Filter Rules").size(14.0).color(TEXT_0).strong())
+            .open(&mut is_open)
+            .collapsible(false)
+            .resizable(false)
+            .default_size([480.0, 300.0])
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.label(RichText::new("Only show traffic matching specified domain keywords (e.g. 'target' matches *target*, 'api.example.com'):").size(11.0).color(TEXT_2));
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut filter_state.new_host_filter_input).hint_text("Type keyword (e.g. target)...").desired_width(280.0));
+                    if ui.button(RichText::new("➕ Add Host").size(11.0).color(ACCENT_GREEN)).clicked() {
+                        let val = filter_state.new_host_filter_input.trim().to_string();
+                        if !val.is_empty() && !filter_state.host_filters.contains(&val) {
+                            filter_state.host_filters.push(val);
+                            filter_state.new_host_filter_input.clear();
+                        }
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.label(RichText::new(format!("Active Host Filters ({})", filter_state.host_filters.len())).size(12.0).color(ACCENT_CYAN).strong());
+                ui.add_space(4.0);
+
+                egui::ScrollArea::vertical()
+                    .id_source("host_filters_scroll")
+                    .max_height(130.0)
+                    .show(ui, |ui| {
+                        if filter_state.host_filters.is_empty() {
+                            ui.label(RichText::new("No host filters active. Traffic from all hosts is visible.").size(11.0).color(TEXT_2));
+                        } else {
+                            let mut to_remove = None;
+                            for (idx, filter) in filter_state.host_filters.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("• *{}*", filter)).size(12.0).color(ACCENT_GREEN).strong());
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button(RichText::new("✖").size(10.0).color(ACCENT_RED)).clicked() {
+                                            to_remove = Some(idx);
+                                        }
+                                    });
+                                });
+                            }
+                            if let Some(idx) = to_remove {
+                                filter_state.host_filters.remove(idx);
+                            }
+                        }
+                    });
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if !filter_state.host_filters.is_empty() {
+                        if ui.button(RichText::new("🗑 Clear All Filters").size(11.0).color(ACCENT_AMBER)).clicked() {
+                            filter_state.host_filters.clear();
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(RichText::new("Close").size(11.0).color(TEXT_0)).clicked() {
+                            filter_state.show_host_filter_modal = false;
+                        }
+                    });
+                });
+            });
+        filter_state.show_host_filter_modal = is_open;
     }
 
     action
