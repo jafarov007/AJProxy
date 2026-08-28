@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::models::*;
 use crate::theme::*;
-use crate::ui::{top_bar, status_bar, dashboard, traffic, intercept, repeater, bruteforce, decoder, comparer, sitemap, modules, settings};
+use crate::ui::{top_bar, status_bar, dashboard, traffic, websocket, intercept, repeater, bruteforce, decoder, comparer, sitemap, modules, settings};
 
 pub struct AJProxyApp {
     #[allow(dead_code)]
@@ -28,6 +28,13 @@ pub struct AJProxyApp {
     pub sitemap_search: String,
     pub modules_list: Vec<ModuleInfo>,
     pub settings: AppSettings,
+    pub ws_sub_tab: WsSubTab,
+    pub ws_history_state: WsHistoryState,
+    pub ws_intercept_state: WsInterceptState,
+    pub ws_repeater_tabs: Vec<WsRepeaterTab>,
+    pub active_ws_repeater_tab: usize,
+    pub ws_connections: Vec<WsConnection>,
+    pub ws_frames: Vec<WsFrameEntry>,
 }
 
 impl AJProxyApp {
@@ -98,6 +105,13 @@ impl AJProxyApp {
             sitemap_search: "".into(),
             modules_list: vec![],
             settings: AppSettings::default(),
+            ws_sub_tab: WsSubTab::default(),
+            ws_history_state: WsHistoryState::default(),
+            ws_intercept_state: WsInterceptState::default(),
+            ws_repeater_tabs: vec![WsRepeaterTab::default()],
+            active_ws_repeater_tab: 0,
+            ws_connections: vec![],
+            ws_frames: vec![],
         }
     }
 
@@ -117,6 +131,18 @@ impl AJProxyApp {
             if self.active_tab == Tab::SiteMap {
                 self.rebuild_sitemap();
             }
+            ctx.request_repaint();
+        }
+
+        let live_ws_conns = crate::proxy::store::get_ws_connections();
+        if live_ws_conns.len() != self.ws_connections.len() {
+            self.ws_connections = live_ws_conns;
+            ctx.request_repaint();
+        }
+
+        let live_ws_frames = crate::proxy::store::get_ws_frames();
+        if live_ws_frames.len() != self.ws_frames.len() {
+            self.ws_frames = live_ws_frames;
             ctx.request_repaint();
         }
     }
@@ -306,6 +332,16 @@ impl App for AJProxyApp {
                         self.active_tab = Tab::Repeater;
                     }
                 }
+                Tab::WebSockets => websocket::render(
+                    ui,
+                    &mut self.ws_sub_tab,
+                    &mut self.ws_history_state,
+                    &mut self.ws_intercept_state,
+                    &mut self.ws_repeater_tabs,
+                    &mut self.active_ws_repeater_tab,
+                    &self.ws_connections,
+                    &self.ws_frames,
+                ),
                 Tab::Repeater => repeater::render(
                     ui,
                     &mut self.repeater_tabs,

@@ -64,6 +64,7 @@ pub fn render(
         let tabs = [
             (Tab::Dashboard, "Dashboard"),
             (Tab::Traffic, "HTTP History"),
+            (Tab::WebSockets, "WebSockets"),
             (Tab::Intercept, "Intercept"),
             (Tab::Repeater, "Repeater"),
             (Tab::BruteForce, "Intruder"),
@@ -95,8 +96,6 @@ pub fn render(
 
         // Status Indicator & Window Controls
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(6.0);
-
             // Window Action Buttons (Explicit sequential order: Close -> Maximize -> Minimize)
             // Close Button
             if ui.add(
@@ -112,7 +111,7 @@ pub fn render(
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
 
-            ui.add_space(2.0);
+            ui.add_space(1.0);
 
             // Maximize / Restore Button
             if ui.add(
@@ -129,7 +128,7 @@ pub fn render(
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
             }
 
-            ui.add_space(2.0);
+            ui.add_space(1.0);
 
             // Minimize Button
             if ui.add(
@@ -145,21 +144,21 @@ pub fn render(
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             }
 
-            ui.add_space(10.0);
+            ui.add_space(4.0);
             ui.separator();
-            ui.add_space(10.0);
+            ui.add_space(4.0);
 
             // Proxy Status Pill
             let (status_text, status_bg, status_fg, status_stroke) = if *proxy_running {
                 (
-                    format!("RUNNING ({}:{})", listen_addr, listen_port),
+                    format!("● {}:{}", listen_addr, listen_port),
                     Color32::from_rgb(10, 38, 22),
                     Color32::from_rgb(74, 222, 128),
                     Stroke::new(1.0_f32, Color32::from_rgb(34, 197, 94)),
                 )
             } else {
                 (
-                    format!("STOPPED ({}:{})", listen_addr, listen_port),
+                    format!("○ {}:{} (OFF)", listen_addr, listen_port),
                     BG_RAISED,
                     TEXT_2,
                     Stroke::new(1.0_f32, BORDER_DIM),

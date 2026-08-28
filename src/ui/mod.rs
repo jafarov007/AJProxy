@@ -8,6 +8,7 @@ pub mod bruteforce;
 pub mod decoder;
 pub mod comparer;
 pub mod sitemap;
+pub mod websocket;
 pub mod modules;
 pub mod settings;
 pub mod filters;

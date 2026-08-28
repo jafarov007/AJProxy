@@ -1,13 +1,23 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use crate::models::{HttpEntry, InterceptRule, HeaderInjectionRule};
+use crate::models::{HttpEntry, InterceptRule, HeaderInjectionRule, WsConnection, WsFrameEntry};
 
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+static NEXT_WS_CONN_ID: AtomicU32 = AtomicU32::new(1);
+static NEXT_WS_FRAME_ID: AtomicU32 = AtomicU32::new(1);
 static INTERCEPT_ENABLED: AtomicBool = AtomicBool::new(false); // DEFAULT OFF!
 
 pub fn next_entry_id() -> u32 {
     NEXT_ID.fetch_add(1, Ordering::SeqCst)
+}
+
+pub fn next_ws_conn_id() -> u32 {
+    NEXT_WS_CONN_ID.fetch_add(1, Ordering::SeqCst)
+}
+
+pub fn next_ws_frame_id() -> u64 {
+    NEXT_WS_FRAME_ID.fetch_add(1, Ordering::SeqCst) as u64
 }
 
 pub fn set_intercept_enabled(enabled: bool) {
@@ -59,12 +69,47 @@ lazy_static::lazy_static! {
     pub static ref HEADER_INJECTION_RULES: Arc<Mutex<Vec<HeaderInjectionRule>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref NOISE_FILTER_SETTINGS: Arc<Mutex<NoiseFilterFlags>> = Arc::new(Mutex::new(NoiseFilterFlags::default()));
     pub static ref PASSTHROUGH_HOSTS: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    pub static ref WS_CONNECTIONS: Arc<Mutex<Vec<WsConnection>>> = Arc::new(Mutex::new(Vec::new()));
+    pub static ref WS_FRAMES: Arc<Mutex<Vec<WsFrameEntry>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref UPSTREAM_AGENT: ureq::Agent = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout(std::time::Duration::from_secs(30))
         .max_idle_connections(200)
         .max_idle_connections_per_host(20)
         .build();
+}
+
+pub fn push_ws_connection(conn: WsConnection) {
+    if let Ok(mut lock) = WS_CONNECTIONS.lock() {
+        lock.push(conn);
+    }
+}
+
+pub fn push_ws_frame(frame: WsFrameEntry) {
+    if let Ok(mut lock) = WS_FRAMES.lock() {
+        if let Ok(mut conns) = WS_CONNECTIONS.lock() {
+            if let Some(conn) = conns.iter_mut().find(|c| c.id == frame.connection_id) {
+                conn.message_count += 1;
+            }
+        }
+        lock.push(frame);
+    }
+}
+
+pub fn get_ws_connections() -> Vec<WsConnection> {
+    if let Ok(lock) = WS_CONNECTIONS.lock() {
+        lock.clone()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn get_ws_frames() -> Vec<WsFrameEntry> {
+    if let Ok(lock) = WS_FRAMES.lock() {
+        lock.clone()
+    } else {
+        Vec::new()
+    }
 }
 
 pub fn update_passthrough_hosts(hosts_csv: &str) {
