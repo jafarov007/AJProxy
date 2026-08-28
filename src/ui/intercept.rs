@@ -299,54 +299,13 @@ fn truncate_intercept_str(s: &str, max_chars: usize) -> String {
                 ui.label(RichText::new("Bypass SSL MITM decryption for matched domains (e.g. *.google.com, banking.com)").size(10.0).color(TEXT_2));
                 ui.add(egui::TextEdit::singleline(&mut settings.passthrough_hosts).desired_width(f32::INFINITY));
 
-                ui.add_space(12.0);
+                ui.add_space(10.0);
 
-                // Section 3: Match & Replace Rules Table
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Match & Replace Rules (Global Settings)").size(12.0).color(ACCENT_CYAN).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(RichText::new("+ Add Match Rule").size(11.0).color(ACCENT_BLUE)).clicked() {
-                            settings.match_rules.push(InterceptRule {
-                                enabled: true,
-                                match_type: "Header".into(),
-                                pattern: "".into(),
-                                action: "".into(),
-                            });
-                        }
-                    });
-                });
+                // Section 3: Notice pointing to Global Settings
                 ui.separator();
-
-                ScrollArea::vertical()
-                    .id_source("modal_rules_scroll")
-                    .max_height(160.0)
-                    .show(ui, |ui| {
-                        if settings.match_rules.is_empty() {
-                            ui.label(RichText::new("No active Match & Replace rules defined.").size(11.0).color(TEXT_2));
-                        } else {
-                            let mut to_delete = None;
-                            for (idx, rule) in settings.match_rules.iter_mut().enumerate() {
-                                ui.horizontal(|ui| {
-                                    ui.checkbox(&mut rule.enabled, "");
-                                    ui.label(RichText::new("Match:").size(11.0).color(TEXT_2));
-                                    ui.add(egui::TextEdit::singleline(&mut rule.pattern).desired_width(160.0));
-                                    ui.label(RichText::new("Replace:").size(11.0).color(TEXT_2));
-                                    ui.add(egui::TextEdit::singleline(&mut rule.action).desired_width(160.0));
-
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.button(RichText::new("✖").size(11.0).color(ACCENT_RED)).clicked() {
-                                            to_delete = Some(idx);
-                                        }
-                                    });
-                                });
-                            }
-                            if let Some(idx) = to_delete {
-                                settings.match_rules.remove(idx);
-                            }
-                        }
-                    });
-
-                listener::update_match_rules(settings.match_rules.clone());
+                ui.add_space(4.0);
+                ui.label(RichText::new("💡 Match & Replace Engine").size(12.0).color(ACCENT_CYAN).strong());
+                ui.label(RichText::new("Match & Replace rules now run globally across all proxy traffic and are managed in the Settings tab under 'Global Match & Replace Engine'.").size(11.0).color(TEXT_2));
 
                 ui.add_space(12.0);
                 ui.separator();
