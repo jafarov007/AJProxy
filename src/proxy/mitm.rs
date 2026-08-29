@@ -147,7 +147,15 @@ pub fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str
             format!("https://{}{}", target_host, raw_path)
         };
 
-        // ── PAUSE IF INTERCEPT IS ON! ─────────────────────────────────────
+        // ── WebSocket Upgrade Handling ────────────────────────────────────
+        if is_websocket_upgrade(&req_headers) {
+            if handle_tls_websocket_tunnel(tls_stream, &target_host, raw_path, &full_url, &method, &req_headers, &req_body, &req_body_bytes, request_start) {
+                return;
+            }
+            break;
+        }
+
+        // ── PAUSE IF HTTP INTERCEPT IS ON! ─────────────────────────────────────
         if is_intercept_enabled() && !is_filtered_noise_request(&full_url, raw_path, &req_headers) {
             let (tx, rx) = channel();
             let entry_id = next_entry_id();
@@ -175,14 +183,6 @@ pub fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str
                     break;
                 }
             }
-        }
-
-        // ── WebSocket Upgrade Handling ────────────────────────────────────
-        if is_websocket_upgrade(&req_headers) {
-            if handle_tls_websocket_tunnel(tls_stream, &target_host, raw_path, &full_url, &method, &req_headers, &req_body, &req_body_bytes, request_start) {
-                return;
-            }
-            break;
         }
 
         let mut req = UPSTREAM_AGENT.request(&method, &full_url);

@@ -1,7 +1,7 @@
 use egui::{self, RichText, Color32, Stroke, Rounding, FontFamily};
 use crate::models::*;
 use crate::theme::*;
-use crate::proxy::store::{PENDING_WS_FRAMES, set_intercept_enabled};
+use crate::proxy::store::{PENDING_WS_FRAMES, set_ws_intercept_enabled};
 use crate::proxy::websocket::protocol::WsRawFrame;
 
 pub fn render(ui: &mut egui::Ui, state: &mut WsInterceptState) {
@@ -23,7 +23,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut WsInterceptState) {
                 .rounding(Rounding::same(6.0))
         ).clicked() {
             state.enabled = !state.enabled;
-            set_intercept_enabled(state.enabled);
+            set_ws_intercept_enabled(state.enabled);
 
             // If turned OFF, flush any pending frames in queue so proxy threads unblock
             if !state.enabled {

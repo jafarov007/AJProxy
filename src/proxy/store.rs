@@ -7,6 +7,7 @@ static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_WS_CONN_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_WS_FRAME_ID: AtomicU32 = AtomicU32::new(1);
 static INTERCEPT_ENABLED: AtomicBool = AtomicBool::new(false); // DEFAULT OFF!
+static WS_INTERCEPT_ENABLED: AtomicBool = AtomicBool::new(false); // DEFAULT OFF!
 
 pub fn next_entry_id() -> u32 {
     NEXT_ID.fetch_add(1, Ordering::SeqCst)
@@ -28,6 +29,14 @@ pub fn is_intercept_enabled() -> bool {
     INTERCEPT_ENABLED.load(Ordering::SeqCst)
 }
 
+pub fn set_ws_intercept_enabled(enabled: bool) {
+    WS_INTERCEPT_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+pub fn is_ws_intercept_enabled() -> bool {
+    WS_INTERCEPT_ENABLED.load(Ordering::SeqCst)
+}
+
 pub enum InterceptDecision {
     Forward,
     Drop,
@@ -47,6 +56,7 @@ pub struct PendingIntercept {
 
 #[derive(Clone)]
 pub struct PendingWsFrame {
+    #[allow(dead_code)]
     pub id: u64,
     pub connection_id: u32,
     pub direction: crate::models::WsDirection,

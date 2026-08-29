@@ -43,7 +43,14 @@ pub fn forward_http_request(mut client_stream: TcpStream, req_headers: &str, req
                 let host = parsed_url.as_ref().and_then(|u| u.host_str()).unwrap_or(&host_header).to_string();
                 let path = parsed_url.as_ref().map(|u| u.path()).unwrap_or(raw_url).to_string();
 
-                // ── PAUSE IF INTERCEPT IS ON! ─────────────────────────────────────
+                // ── Plain HTTP WebSocket Upgrade Handling ────────────────────────
+                if is_websocket_upgrade(&req_headers) {
+                    if handle_plain_websocket_tunnel(&mut client_stream, &host, &path, &full_url, &method, &req_headers, &req_body, start_time) {
+                        return;
+                    }
+                }
+
+                // ── PAUSE IF HTTP INTERCEPT IS ON! ─────────────────────────────────────
                 if is_intercept_enabled() && !is_filtered_noise_request(&full_url, &path, &req_headers) {
                     let (tx, rx) = channel();
                     let entry_id = next_entry_id();
@@ -70,13 +77,6 @@ pub fn forward_http_request(mut client_stream: TcpStream, req_headers: &str, req
                             let _ = client_stream.write_all(drop_resp.as_bytes());
                             return;
                         }
-                    }
-                }
-
-                // ── Plain HTTP WebSocket Upgrade Handling ────────────────────────
-                if is_websocket_upgrade(&req_headers) {
-                    if handle_plain_websocket_tunnel(&mut client_stream, &host, &path, &full_url, &method, &req_headers, &req_body, start_time) {
-                        return;
                     }
                 }
 

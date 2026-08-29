@@ -1,7 +1,7 @@
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use crate::models::WsDirection;
-use crate::proxy::store::{is_intercept_enabled, PENDING_WS_FRAMES, PendingWsFrame};
+use crate::proxy::store::{is_ws_intercept_enabled, PENDING_WS_FRAMES, PendingWsFrame};
 use crate::proxy::websocket::protocol::WsRawFrame;
 
 pub fn check_and_intercept_frame(
@@ -9,7 +9,7 @@ pub fn check_and_intercept_frame(
     frame: WsRawFrame,
     direction: WsDirection,
 ) -> Option<WsRawFrame> {
-    if !is_intercept_enabled() {
+    if !is_ws_intercept_enabled() {
         return Some(frame);
     }
 
