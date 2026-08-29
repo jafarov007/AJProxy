@@ -483,7 +483,7 @@ pub struct WsHistoryState {
 #[derive(Clone, Default)]
 pub struct WsInterceptState {
     pub enabled: bool,
-    pub active_pending: Option<crate::proxy::store::PendingWsFrame>,
+    pub selected_frame_id: Option<u64>,
     pub edited_payload: String,
     pub edited_opcode: WsOpcode,
 }
