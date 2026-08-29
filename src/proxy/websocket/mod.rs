@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use crate::models::{HttpEntry, WsConnection, WsDirection, WsFrameEntry};
+use crate::models::{HttpEntry, WsConnection, WsDirection, WsFrameEntry, WsOpcode};
 use crate::proxy::store::{
     next_entry_id, next_ws_conn_id, next_ws_frame_id, push_captured_entry,
     push_ws_connection, push_ws_frame, update_ws_conn_status,
@@ -28,6 +28,23 @@ pub fn is_websocket_upgrade(req_headers: &str) -> bool {
             false
         }
     })
+}
+
+fn format_ws_payload_preview(opcode_u8: u8, payload: &[u8]) -> String {
+    if payload.is_empty() {
+        return match opcode_u8 {
+            0x9 => "[Ping]".to_string(),
+            0xA => "[Pong]".to_string(),
+            _ => String::new(),
+        };
+    }
+    match std::str::from_utf8(payload) {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            let hex_preview: Vec<String> = payload.iter().take(16).map(|b| format!("{:02X}", b)).collect();
+            format!("[Binary {}B] {}", payload.len(), hex_preview.join(" "))
+        }
+    }
 }
 
 // ── TLS WebSocket Proxy Tunnel Handler ───────────────────────────────
@@ -133,6 +150,36 @@ pub fn handle_tls_websocket_tunnel(
 
                     match frame_res {
                         Ok(frame) => {
+                            // Ping frame handling
+                            if frame.opcode_u8 == 0x9 {
+                                push_ws_frame(WsFrameEntry {
+                                    id: next_ws_frame_id(),
+                                    connection_id: conn_id,
+                                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                                    direction: WsDirection::ClientToServer,
+                                    opcode: WsOpcode::Ping,
+                                    length: frame.payload.len(),
+                                    payload: format_ws_payload_preview(0x9, &frame.payload),
+                                    payload_bytes: frame.payload.clone(),
+                                    is_final: true,
+                                });
+                            }
+
+                            // Pong frame handling
+                            if frame.opcode_u8 == 0xA {
+                                push_ws_frame(WsFrameEntry {
+                                    id: next_ws_frame_id(),
+                                    connection_id: conn_id,
+                                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                                    direction: WsDirection::ClientToServer,
+                                    opcode: WsOpcode::Pong,
+                                    length: frame.payload.len(),
+                                    payload: format_ws_payload_preview(0xA, &frame.payload),
+                                    payload_bytes: frame.payload.clone(),
+                                    is_final: true,
+                                });
+                            }
+
                             // Close frame check
                             if frame.opcode_u8 == 0x8 {
                                 let (code, reason) = parse_close_code(&frame.payload);
@@ -163,20 +210,22 @@ pub fn handle_tls_websocket_tunnel(
                                 None => continue, // Dropped
                             };
 
-                            let payload_text = String::from_utf8_lossy(&frame_to_send.payload).to_string();
+                            let payload_preview = format_ws_payload_preview(frame_to_send.opcode_u8, &frame_to_send.payload);
 
                             if let Some(reassembled) = reassembler.process_frame(conn_id, frame_to_send.clone()) {
-                                push_ws_frame(WsFrameEntry {
-                                    id: next_ws_frame_id(),
-                                    connection_id: conn_id,
-                                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                    direction: WsDirection::ClientToServer,
-                                    opcode: reassembled.to_opcode(),
-                                    length: reassembled.payload.len(),
-                                    payload: payload_text,
-                                    payload_bytes: reassembled.payload,
-                                    is_final: reassembled.fin,
-                                });
+                                if reassembled.opcode_u8 != 0x9 && reassembled.opcode_u8 != 0xA && reassembled.opcode_u8 != 0x8 {
+                                    push_ws_frame(WsFrameEntry {
+                                        id: next_ws_frame_id(),
+                                        connection_id: conn_id,
+                                        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                                        direction: WsDirection::ClientToServer,
+                                        opcode: reassembled.to_opcode(),
+                                        length: reassembled.payload.len(),
+                                        payload: payload_preview,
+                                        payload_bytes: reassembled.payload,
+                                        is_final: reassembled.fin,
+                                    });
+                                }
                             }
 
                             if let Ok(mut s) = s_clone.lock() {
@@ -210,10 +259,49 @@ pub fn handle_tls_websocket_tunnel(
                     Ok(frame) => {
                         // Auto Ping -> Pong response
                         if frame.opcode_u8 == 0x9 {
+                            push_ws_frame(WsFrameEntry {
+                                id: next_ws_frame_id(),
+                                connection_id: conn_id,
+                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                                direction: WsDirection::ServerToClient,
+                                opcode: WsOpcode::Ping,
+                                length: frame.payload.len(),
+                                payload: format_ws_payload_preview(0x9, &frame.payload),
+                                payload_bytes: frame.payload.clone(),
+                                is_final: true,
+                            });
+
                             let pong = build_pong_frame(&frame);
                             if let Ok(mut s) = server_arc.lock() {
                                 let _ = write_ws_frame(&mut *s, &pong);
                             }
+
+                            push_ws_frame(WsFrameEntry {
+                                id: next_ws_frame_id(),
+                                connection_id: conn_id,
+                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                                direction: WsDirection::ClientToServer,
+                                opcode: WsOpcode::Pong,
+                                length: pong.payload.len(),
+                                payload: format_ws_payload_preview(0xA, &pong.payload),
+                                payload_bytes: pong.payload.clone(),
+                                is_final: true,
+                            });
+                        }
+
+                        // Pong frame check
+                        if frame.opcode_u8 == 0xA {
+                            push_ws_frame(WsFrameEntry {
+                                id: next_ws_frame_id(),
+                                connection_id: conn_id,
+                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                                direction: WsDirection::ServerToClient,
+                                opcode: WsOpcode::Pong,
+                                length: frame.payload.len(),
+                                payload: format_ws_payload_preview(0xA, &frame.payload),
+                                payload_bytes: frame.payload.clone(),
+                                is_final: true,
+                            });
                         }
 
                         // Close frame check
@@ -245,20 +333,22 @@ pub fn handle_tls_websocket_tunnel(
                             None => continue, // Dropped
                         };
 
-                        let payload_text = String::from_utf8_lossy(&frame_to_send.payload).to_string();
+                        let payload_preview = format_ws_payload_preview(frame_to_send.opcode_u8, &frame_to_send.payload);
 
                         if let Some(reassembled) = reassembler.process_frame(conn_id, frame_to_send.clone()) {
-                            push_ws_frame(WsFrameEntry {
-                                id: next_ws_frame_id(),
-                                connection_id: conn_id,
-                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                direction: WsDirection::ServerToClient,
-                                opcode: reassembled.to_opcode(),
-                                length: reassembled.payload.len(),
-                                payload: payload_text,
-                                payload_bytes: reassembled.payload,
-                                is_final: reassembled.fin,
-                            });
+                            if reassembled.opcode_u8 != 0x9 && reassembled.opcode_u8 != 0xA && reassembled.opcode_u8 != 0x8 {
+                                push_ws_frame(WsFrameEntry {
+                                    id: next_ws_frame_id(),
+                                    connection_id: conn_id,
+                                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                                    direction: WsDirection::ServerToClient,
+                                    opcode: reassembled.to_opcode(),
+                                    length: reassembled.payload.len(),
+                                    payload: payload_preview,
+                                    payload_bytes: reassembled.payload,
+                                    is_final: reassembled.fin,
+                                });
+                            }
                         }
 
                         if let Ok(mut c) = client_arc.lock() {
@@ -363,6 +453,21 @@ pub fn handle_plain_websocket_tunnel(
             loop {
                 match read_ws_frame(&mut client_clone) {
                     Ok(frame) => {
+                        // Ping / Pong frame check
+                        if frame.opcode_u8 == 0x9 || frame.opcode_u8 == 0xA {
+                            push_ws_frame(WsFrameEntry {
+                                id: next_ws_frame_id(),
+                                connection_id: conn_id,
+                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                                direction: WsDirection::ClientToServer,
+                                opcode: frame.to_opcode(),
+                                length: frame.payload.len(),
+                                payload: format_ws_payload_preview(frame.opcode_u8, &frame.payload),
+                                payload_bytes: frame.payload.clone(),
+                                is_final: true,
+                            });
+                        }
+
                         if frame.opcode_u8 == 0x8 {
                             let (code, reason) = parse_close_code(&frame.payload);
                             update_ws_conn_status(conn_id, &format!("Closed ({})", code));
@@ -386,20 +491,22 @@ pub fn handle_plain_websocket_tunnel(
                             None => continue,
                         };
 
-                        let payload_text = String::from_utf8_lossy(&frame_to_send.payload).to_string();
+                        let payload_preview = format_ws_payload_preview(frame_to_send.opcode_u8, &frame_to_send.payload);
 
                         if let Some(reassembled) = reassembler.process_frame(conn_id, frame_to_send.clone()) {
-                            push_ws_frame(WsFrameEntry {
-                                id: next_ws_frame_id(),
-                                connection_id: conn_id,
-                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                direction: WsDirection::ClientToServer,
-                                opcode: reassembled.to_opcode(),
-                                length: reassembled.payload.len(),
-                                payload: payload_text,
-                                payload_bytes: reassembled.payload,
-                                is_final: reassembled.fin,
-                            });
+                            if reassembled.opcode_u8 != 0x9 && reassembled.opcode_u8 != 0xA && reassembled.opcode_u8 != 0x8 {
+                                push_ws_frame(WsFrameEntry {
+                                    id: next_ws_frame_id(),
+                                    connection_id: conn_id,
+                                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                                    direction: WsDirection::ClientToServer,
+                                    opcode: reassembled.to_opcode(),
+                                    length: reassembled.payload.len(),
+                                    payload: payload_preview,
+                                    payload_bytes: reassembled.payload,
+                                    is_final: reassembled.fin,
+                                });
+                            }
                         }
 
                         if write_ws_frame(&mut server_clone, &frame_to_send).is_err() {
@@ -419,8 +526,32 @@ pub fn handle_plain_websocket_tunnel(
             match read_ws_frame(&mut server_tcp) {
                 Ok(frame) => {
                     if frame.opcode_u8 == 0x9 {
+                        push_ws_frame(WsFrameEntry {
+                            id: next_ws_frame_id(),
+                            connection_id: conn_id,
+                            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                            direction: WsDirection::ServerToClient,
+                            opcode: WsOpcode::Ping,
+                            length: frame.payload.len(),
+                            payload: format_ws_payload_preview(0x9, &frame.payload),
+                            payload_bytes: frame.payload.clone(),
+                            is_final: true,
+                        });
+
                         let pong = build_pong_frame(&frame);
-                        let _ = write_ws_frame(&mut server_tcp, &pong);
+                        let _ = write_ws_frame(client_stream, &pong);
+
+                        push_ws_frame(WsFrameEntry {
+                            id: next_ws_frame_id(),
+                            connection_id: conn_id,
+                            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                            direction: WsDirection::ClientToServer,
+                            opcode: WsOpcode::Pong,
+                            length: pong.payload.len(),
+                            payload: format_ws_payload_preview(0xA, &pong.payload),
+                            payload_bytes: pong.payload.clone(),
+                            is_final: true,
+                        });
                     }
 
                     if frame.opcode_u8 == 0x8 {
@@ -446,20 +577,22 @@ pub fn handle_plain_websocket_tunnel(
                         None => continue,
                     };
 
-                    let payload_text = String::from_utf8_lossy(&frame_to_send.payload).to_string();
+                    let payload_preview = format_ws_payload_preview(frame_to_send.opcode_u8, &frame_to_send.payload);
 
                     if let Some(reassembled) = reassembler.process_frame(conn_id, frame_to_send.clone()) {
-                        push_ws_frame(WsFrameEntry {
-                            id: next_ws_frame_id(),
-                            connection_id: conn_id,
-                            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                            direction: WsDirection::ServerToClient,
-                            opcode: reassembled.to_opcode(),
-                            length: reassembled.payload.len(),
-                            payload: payload_text,
-                            payload_bytes: reassembled.payload,
-                            is_final: reassembled.fin,
-                        });
+                        if reassembled.opcode_u8 != 0x9 && reassembled.opcode_u8 != 0xA && reassembled.opcode_u8 != 0x8 {
+                            push_ws_frame(WsFrameEntry {
+                                id: next_ws_frame_id(),
+                                connection_id: conn_id,
+                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                                direction: WsDirection::ServerToClient,
+                                opcode: reassembled.to_opcode(),
+                                length: reassembled.payload.len(),
+                                payload: payload_preview,
+                                payload_bytes: reassembled.payload,
+                                is_final: reassembled.fin,
+                            });
+                        }
                     }
 
                     if write_ws_frame(client_stream, &frame_to_send).is_err() {

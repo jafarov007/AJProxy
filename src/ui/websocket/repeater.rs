@@ -15,6 +15,8 @@ pub fn render(
         *active_tab_idx = 0;
     }
 
+    let active_conns = crate::proxy::store::get_ws_connections();
+
     // ── WS Repeater Tab Bar ──────────────────────────────────────────
     ui.horizontal(|ui| {
         let mut to_remove = None;
@@ -75,42 +77,85 @@ pub fn render(
     // ── Target Connection Header Bar ─────────────────────────────────
     section_frame().show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Target WS URL:").size(11.0).color(TEXT_1).strong());
-            ui.add(
-                egui::TextEdit::singleline(&mut tab.target_url)
-                    .hint_text("wss://example.com/socket")
-                    .desired_width(380.0)
-            );
+            ui.label(RichText::new("Target Socket:").size(11.0).color(TEXT_1).strong());
 
-            let (conn_btn_text, conn_btn_bg, conn_btn_fg) = if tab.is_connected {
-                ("❌ Disconnect", Color32::from_rgb(60, 15, 20), ACCENT_RED)
+            // Active Captured Proxy Connection Selector Dropdown
+            let current_label = if tab.target_url.starts_with("WS #") {
+                tab.target_url.clone()
+            } else if active_conns.iter().any(|c| c.url == tab.target_url) {
+                if let Some(c) = active_conns.iter().find(|c| c.url == tab.target_url) {
+                    format!("⚡ WS #{} ({})", c.id, c.host)
+                } else {
+                    tab.target_url.clone()
+                }
             } else {
-                ("🔌 Connect", ACCENT_BLUE, TEXT_0)
+                format!("🔌 Standalone ({})", if tab.target_url.is_empty() { "wss://..." } else { &tab.target_url })
             };
 
-            if ui.add(
-                egui::Button::new(RichText::new(conn_btn_text).size(11.0).color(conn_btn_fg).strong())
-                    .fill(conn_btn_bg)
-                    .rounding(Rounding::same(4.0))
-            ).clicked() {
-                tab.is_connected = !tab.is_connected;
-                let status_msg = if tab.is_connected { "Connected to WebSocket endpoint." } else { "Disconnected." };
-                tab.log_messages.push(WsFrameEntry {
-                    id: tab.log_messages.len() as u64 + 1,
-                    connection_id: 0,
-                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                    direction: WsDirection::ServerToClient,
-                    opcode: WsOpcode::Text,
-                    length: status_msg.len(),
-                    payload: status_msg.into(),
-                    payload_bytes: status_msg.as_bytes().to_vec(),
-                    is_final: true,
+            egui::ComboBox::from_id_source(format!("ws_target_combo_{}", active_tab_idx))
+                .selected_text(RichText::new(current_label).size(11.0).color(TEXT_0))
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(!tab.target_url.starts_with("WS #"), "🔌 Standalone Socket (Connect New Endpoint)").clicked() {
+                        if tab.target_url.starts_with("WS #") {
+                            tab.target_url = "wss://echo.websocket.events".into();
+                            tab.is_connected = false;
+                        }
+                    }
+                    if !active_conns.is_empty() {
+                        ui.separator();
+                        ui.label(RichText::new("Captured Proxy Tunnels:").size(10.0).color(TEXT_2));
+                        for conn in &active_conns {
+                            let label = format!("⚡ WS #{} - {} ({})", conn.id, conn.host, conn.status);
+                            let conn_url_tag = format!("WS #{}", conn.id);
+                            if ui.selectable_label(tab.target_url == conn_url_tag || tab.target_url == conn.url, &label).clicked() {
+                                tab.target_url = conn.url.clone();
+                                tab.is_connected = conn.status.starts_with("Active");
+                            }
+                        }
+                    }
                 });
+
+            // Input URL for standalone
+            if !active_conns.iter().any(|c| c.url == tab.target_url) {
+                ui.add_space(8.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut tab.target_url)
+                        .hint_text("wss://example.com/socket")
+                        .desired_width(280.0)
+                );
+
+                let (conn_btn_text, conn_btn_bg, conn_btn_fg) = if tab.is_connected {
+                    ("❌ Disconnect", Color32::from_rgb(60, 15, 20), ACCENT_RED)
+                } else {
+                    ("🔌 Connect", ACCENT_BLUE, TEXT_0)
+                };
+
+                if ui.add(
+                    egui::Button::new(RichText::new(conn_btn_text).size(11.0).color(conn_btn_fg).strong())
+                        .fill(conn_btn_bg)
+                        .rounding(Rounding::same(4.0))
+                ).clicked() {
+                    tab.is_connected = !tab.is_connected;
+                    let status_msg = if tab.is_connected { "Connected standalone WebSocket client." } else { "Disconnected." };
+                    tab.log_messages.push(WsFrameEntry {
+                        id: tab.log_messages.len() as u64 + 1,
+                        connection_id: 0,
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        direction: WsDirection::ServerToClient,
+                        opcode: WsOpcode::Text,
+                        length: status_msg.len(),
+                        payload: status_msg.into(),
+                        payload_bytes: status_msg.as_bytes().to_vec(),
+                        is_final: true,
+                    });
+                }
+            } else {
+                tab.is_connected = active_conns.iter().find(|c| c.url == tab.target_url).map(|c| c.status.starts_with("Active")).unwrap_or(false);
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (status_text, status_color) = if tab.is_connected {
-                    ("ONLINE", ACCENT_GREEN)
+                    ("ONLINE (TUNNEL ACTIVE)", ACCENT_GREEN)
                 } else {
                     ("OFFLINE", TEXT_2)
                 };
@@ -133,9 +178,15 @@ pub fn render(
                             .fill(ACCENT_BLUE)
                             .rounding(Rounding::same(4.0))
                     ).clicked() {
+                        let conn_id = active_conns
+                            .iter()
+                            .find(|c| c.url == tab.target_url)
+                            .map(|c| c.id)
+                            .unwrap_or(1);
+
                         let msg = WsFrameEntry {
                             id: tab.log_messages.len() as u64 + 1,
-                            connection_id: 1,
+                            connection_id: conn_id,
                             timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
                             direction: WsDirection::ClientToServer,
                             opcode: tab.send_opcode.clone(),
@@ -144,6 +195,9 @@ pub fn render(
                             payload_bytes: tab.payload_input.as_bytes().to_vec(),
                             is_final: true,
                         };
+
+                        // Record into global WS History & active stream
+                        crate::proxy::store::push_ws_frame(msg.clone());
                         tab.log_messages.push(msg);
                     }
                 });
