@@ -476,6 +476,8 @@ pub struct WsHistoryState {
     pub filter_opcode: Option<WsOpcode>,
     pub selected_frame_id: Option<u64>,
     pub inspector_mode: usize, // 0: Raw Text, 1: Hex, 2: JSON
+    pub show_export_modal: bool,
+    pub export_status_msg: String,
 }
 
 #[derive(Clone, Debug, Default)]

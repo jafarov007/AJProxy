@@ -1,6 +1,28 @@
+use std::collections::HashMap;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use egui::{self, RichText, Color32, ScrollArea, Stroke, Rounding, FontFamily};
 use crate::models::*;
 use crate::theme::*;
+use crate::proxy::websocket::protocol::WsRawFrame;
+use crate::proxy::websocket::repeater_client::spawn_repeater_client;
+
+lazy_static::lazy_static! {
+    static ref REPEATER_CLIENT_HANDLES: Arc<Mutex<HashMap<usize, Sender<WsRawFrame>>>> = Arc::new(Mutex::new(HashMap::new()));
+    static ref REPEATER_INCOMING_QUEUE: Arc<Mutex<Vec<(usize, WsFrameEntry)>>> = Arc::new(Mutex::new(Vec::new()));
+}
+
+fn drain_incoming_messages(repeater_tabs: &mut [WsRepeaterTab]) {
+    if let Ok(mut lock) = REPEATER_INCOMING_QUEUE.lock() {
+        if !lock.is_empty() {
+            for (tab_idx, frame) in lock.drain(..) {
+                if tab_idx < repeater_tabs.len() {
+                    repeater_tabs[tab_idx].log_messages.push(frame);
+                }
+            }
+        }
+    }
+}
 
 pub fn render(
     ui: &mut egui::Ui,
@@ -14,6 +36,9 @@ pub fn render(
     if *active_tab_idx >= repeater_tabs.len() {
         *active_tab_idx = 0;
     }
+
+    // Drain any incoming WebSocket responses from background client threads into tab logs
+    drain_incoming_messages(repeater_tabs);
 
     let active_conns = crate::proxy::store::get_ws_connections();
 
@@ -45,6 +70,9 @@ pub fn render(
         }
 
         if let Some(idx) = to_remove {
+            if let Ok(mut lock) = REPEATER_CLIENT_HANDLES.lock() {
+                lock.remove(&idx);
+            }
             repeater_tabs.remove(idx);
             if *active_tab_idx >= repeater_tabs.len() {
                 *active_tab_idx = repeater_tabs.len().saturating_sub(1);
@@ -72,7 +100,8 @@ pub fn render(
     ui.separator();
     ui.add_space(6.0);
 
-    let tab = &mut repeater_tabs[*active_tab_idx];
+    let tab_idx = *active_tab_idx;
+    let tab = &mut repeater_tabs[tab_idx];
 
     // ── Target Connection Header Bar ─────────────────────────────────
     section_frame().show(ui, |ui| {
@@ -92,7 +121,7 @@ pub fn render(
                 format!("🔌 Standalone ({})", if tab.target_url.is_empty() { "wss://..." } else { &tab.target_url })
             };
 
-            egui::ComboBox::from_id_source(format!("ws_target_combo_{}", active_tab_idx))
+            egui::ComboBox::from_id_source(format!("ws_target_combo_{}", tab_idx))
                 .selected_text(RichText::new(current_label).size(11.0).color(TEXT_0))
                 .show_ui(ui, |ui| {
                     if ui.selectable_label(!tab.target_url.starts_with("WS #"), "🔌 Standalone Socket (Connect New Endpoint)").clicked() {
@@ -115,76 +144,109 @@ pub fn render(
                     }
                 });
 
-            // Active Tunnel controls vs. Standalone socket controls
+            // Target URL text editor for standalone socket connection
             let matched_conn = active_conns.iter().find(|c| c.url == tab.target_url);
 
-            if let Some(conn) = matched_conn {
-                tab.is_connected = conn.status.starts_with("Active");
-                if tab.is_connected {
-                    if ui.add(
-                        egui::Button::new(RichText::new("❌ Terminate Tunnel").size(11.0).color(ACCENT_RED).strong())
-                            .fill(Color32::from_rgb(60, 15, 20))
-                            .rounding(Rounding::same(4.0))
-                    ).clicked() {
-                        crate::proxy::store::update_ws_conn_status(conn.id, "Closed (User Action)");
-                        tab.is_connected = false;
-
-                        let close_msg = WsFrameEntry {
-                            id: tab.log_messages.len() as u64 + 1,
-                            connection_id: conn.id,
-                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                            direction: WsDirection::ClientToServer,
-                            opcode: WsOpcode::Close,
-                            length: 2,
-                            payload: "Normal Closure (1000)".into(),
-                            payload_bytes: vec![0x03, 0xE8],
-                            is_final: true,
-                        };
-                        crate::proxy::store::push_ws_frame(close_msg.clone());
-                        tab.log_messages.push(close_msg);
-                    }
-                }
-            } else {
-                // Standalone mode controls
-                ui.add_space(8.0);
+            if matched_conn.is_none() {
+                ui.add_space(4.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut tab.target_url)
-                        .hint_text("wss://example.com/socket")
-                        .desired_width(280.0)
+                        .hint_text("wss://echo.websocket.org")
+                        .desired_width(240.0)
                 );
+            }
 
-                let (conn_btn_text, conn_btn_bg, conn_btn_fg) = if tab.is_connected {
-                    ("❌ Disconnect", Color32::from_rgb(60, 15, 20), ACCENT_RED)
+            // Feature 3: Connect / Reconnect Button
+            let is_handle_connected = {
+                if let Ok(lock) = REPEATER_CLIENT_HANDLES.lock() {
+                    lock.contains_key(&tab_idx)
                 } else {
-                    ("🔌 Connect", ACCENT_BLUE, TEXT_0)
-                };
+                    false
+                }
+            };
 
-                if ui.add(
-                    egui::Button::new(RichText::new(conn_btn_text).size(11.0).color(conn_btn_fg).strong())
-                        .fill(conn_btn_bg)
-                        .rounding(Rounding::same(4.0))
-                ).clicked() {
-                    tab.is_connected = !tab.is_connected;
-                    let status_msg = if tab.is_connected { "Connected standalone WebSocket client." } else { "Disconnected." };
+            let is_online = tab.is_connected || is_handle_connected;
+
+            let (conn_btn_text, conn_btn_bg, conn_btn_fg) = if is_online {
+                ("❌ Disconnect", Color32::from_rgb(60, 15, 20), ACCENT_RED)
+            } else {
+                ("🔌 Reconnect / Connect Socket", ACCENT_BLUE, TEXT_0)
+            };
+
+            if ui.add(
+                egui::Button::new(RichText::new(conn_btn_text).size(11.0).color(conn_btn_fg).strong())
+                    .fill(conn_btn_bg)
+                    .rounding(Rounding::same(4.0))
+            ).clicked() {
+                if is_online {
+                    // Disconnect
+                    if let Ok(mut lock) = REPEATER_CLIENT_HANDLES.lock() {
+                        lock.remove(&tab_idx);
+                    }
+                    tab.is_connected = false;
+                    let msg = "Disconnected socket connection.";
                     tab.log_messages.push(WsFrameEntry {
-                        id: tab.log_messages.len() as u64 + 1,
+                        id: crate::proxy::store::next_ws_frame_id(),
                         connection_id: 0,
                         timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                         direction: WsDirection::ServerToClient,
-                        opcode: WsOpcode::Text,
-                        length: status_msg.len(),
-                        payload: status_msg.into(),
-                        payload_bytes: status_msg.as_bytes().to_vec(),
+                        opcode: WsOpcode::Close,
+                        length: msg.len(),
+                        payload: msg.into(),
+                        payload_bytes: msg.as_bytes().to_vec(),
                         is_final: true,
                     });
+                } else {
+                    // Connect / Reconnect
+                    let url_to_connect = tab.target_url.clone();
+                    let current_tab_idx = tab_idx;
+                    match spawn_repeater_client(url_to_connect.clone(), move |frame| {
+                        if let Ok(mut q) = REPEATER_INCOMING_QUEUE.lock() {
+                            q.push((current_tab_idx, frame));
+                        }
+                    }) {
+                        Ok(handle) => {
+                            if let Ok(mut lock) = REPEATER_CLIENT_HANDLES.lock() {
+                                lock.insert(current_tab_idx, handle.tx);
+                            }
+                            tab.is_connected = true;
+                            let msg = format!("⚡ Connected online client socket to: {}", url_to_connect);
+                            tab.log_messages.push(WsFrameEntry {
+                                id: crate::proxy::store::next_ws_frame_id(),
+                                connection_id: 0,
+                                timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                direction: WsDirection::ServerToClient,
+                                opcode: WsOpcode::Text,
+                                length: msg.len(),
+                                payload: msg,
+                                payload_bytes: vec![],
+                                is_final: true,
+                            });
+                        }
+                        Err(err_msg) => {
+                            tab.is_connected = false;
+                            let msg = format!("❌ Socket Connection Error: {}", err_msg);
+                            tab.log_messages.push(WsFrameEntry {
+                                id: crate::proxy::store::next_ws_frame_id(),
+                                connection_id: 0,
+                                timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                direction: WsDirection::ServerToClient,
+                                opcode: WsOpcode::Close,
+                                length: msg.len(),
+                                payload: msg,
+                                payload_bytes: vec![],
+                                is_final: true,
+                            });
+                        }
+                    }
                 }
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (status_text, status_color) = if tab.is_connected {
-                    ("ONLINE (TUNNEL ACTIVE)", ACCENT_GREEN)
+                let (status_text, status_color) = if is_online {
+                    ("● ONLINE", ACCENT_GREEN)
                 } else {
-                    ("OFFLINE", TEXT_2)
+                    ("● OFFLINE (CLOSED)", TEXT_2)
                 };
                 ui.label(RichText::new(status_text).size(11.0).color(status_color).strong());
             });
@@ -205,21 +267,83 @@ pub fn render(
                             .fill(ACCENT_BLUE)
                             .rounding(Rounding::same(4.0))
                     ).clicked() {
+                        let is_handle_connected = {
+                            if let Ok(lock) = REPEATER_CLIENT_HANDLES.lock() {
+                                lock.contains_key(&tab_idx)
+                            } else {
+                                false
+                            }
+                        };
+
+                        // Auto-reconnect if offline!
+                        if !is_handle_connected && !tab.target_url.is_empty() {
+                            let url_to_connect = tab.target_url.clone();
+                            let current_tab_idx = tab_idx;
+                            if let Ok(handle) = spawn_repeater_client(url_to_connect, move |frame| {
+                                if let Ok(mut q) = REPEATER_INCOMING_QUEUE.lock() {
+                                    q.push((current_tab_idx, frame));
+                                }
+                            }) {
+                                if let Ok(mut lock) = REPEATER_CLIENT_HANDLES.lock() {
+                                    lock.insert(current_tab_idx, handle.tx);
+                                }
+                                tab.is_connected = true;
+                            }
+                        }
+
+                        let payload_bytes = match tab.send_opcode {
+                            WsOpcode::Binary => {
+                                // Try parsing hex string or raw bytes
+                                let clean_hex: String = tab.payload_input.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+                                if clean_hex.len() % 2 == 0 && !clean_hex.is_empty() {
+                                    (0..clean_hex.len())
+                                        .step_by(2)
+                                        .map(|i| u8::from_str_radix(&clean_hex[i..i + 2], 16).unwrap_or(0))
+                                        .collect()
+                                } else {
+                                    tab.payload_input.as_bytes().to_vec()
+                                }
+                            }
+                            _ => tab.payload_input.as_bytes().to_vec(),
+                        };
+
+                        let raw_frame = WsRawFrame {
+                            fin: true,
+                            opcode_u8: match tab.send_opcode {
+                                WsOpcode::Text => 0x1,
+                                WsOpcode::Binary => 0x2,
+                                WsOpcode::Close => 0x8,
+                                WsOpcode::Ping => 0x9,
+                                WsOpcode::Pong => 0xA,
+                                _ => 0x1,
+                            },
+                            masked: true,
+                            mask_key: Some([0x12, 0x34, 0x56, 0x78]),
+                            payload: payload_bytes.clone(),
+                        };
+
+                        // Send to active repeater socket connection if available
+                        if let Ok(lock) = REPEATER_CLIENT_HANDLES.lock() {
+                            if let Some(tx) = lock.get(&tab_idx) {
+                                let _ = tx.send(raw_frame);
+                            }
+                        }
+
                         let conn_id = active_conns
                             .iter()
                             .find(|c| c.url == tab.target_url)
                             .map(|c| c.id)
-                            .unwrap_or(1);
+                            .unwrap_or(0);
 
                         let msg = WsFrameEntry {
-                            id: tab.log_messages.len() as u64 + 1,
+                            id: crate::proxy::store::next_ws_frame_id(),
                             connection_id: conn_id,
                             timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
                             direction: WsDirection::ClientToServer,
                             opcode: tab.send_opcode.clone(),
-                            length: tab.payload_input.len(),
+                            length: payload_bytes.len(),
                             payload: tab.payload_input.clone(),
-                            payload_bytes: tab.payload_input.as_bytes().to_vec(),
+                            payload_bytes,
                             is_final: true,
                         };
 

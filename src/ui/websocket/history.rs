@@ -1,6 +1,8 @@
 use egui::{self, RichText, Color32, ScrollArea, Rounding, FontFamily};
 use crate::models::*;
 use crate::theme::*;
+use std::fs::File;
+use std::io::Write;
 
 pub fn render(
     ui: &mut egui::Ui,
@@ -11,6 +13,9 @@ pub fn render(
     active_repeater_tab: &mut usize,
     ws_sub_tab: &mut WsSubTab,
 ) {
+    // ── Render WS Export Modal if requested ──
+    render_ws_export_modal(ui.ctx(), state, connections, frames);
+
     egui::SidePanel::left("ws_history_connections_panel")
         .default_width(260.0)
         .width_range(200.0..=360.0)
@@ -78,16 +83,16 @@ pub fn render(
 
     // ── Main Frame Stream & Inspector Panel ──────────────────────────
     egui::CentralPanel::default().show_inside(ui, |ui| {
-        // Toolbar: Search & Opcode Filter
+        // Toolbar: Search, Opcode Filter, Clear & Export Buttons
         ui.horizontal(|ui| {
             ui.label(RichText::new("🔍 Search:").size(11.0).color(TEXT_1).strong());
             ui.add(
                 egui::TextEdit::singleline(&mut state.search_query)
                     .hint_text("Filter payload text...")
-                    .desired_width(180.0)
+                    .desired_width(140.0)
             );
 
-            ui.add_space(10.0);
+            ui.add_space(6.0);
             ui.label(RichText::new("Opcode:").size(11.0).color(TEXT_1).strong());
 
             let filters = [
@@ -106,6 +111,29 @@ pub fn render(
                     state.filter_opcode = op;
                 }
             }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Feature 1: Clear WS History Button
+                if ui.add(
+                    egui::Button::new(RichText::new("🗑 Clear History").size(10.0).color(ACCENT_RED).strong())
+                        .fill(Color32::from_rgb(50, 15, 20))
+                        .rounding(Rounding::same(4.0))
+                ).clicked() {
+                    crate::proxy::store::clear_ws_history();
+                    state.selected_connection_id = None;
+                    state.selected_frame_id = None;
+                }
+
+                // Feature 2: Export WS History Button
+                if ui.add(
+                    egui::Button::new(RichText::new("📥 Export Logs").size(10.0).color(ACCENT_GREEN).strong())
+                        .fill(Color32::from_rgb(15, 45, 25))
+                        .rounding(Rounding::same(4.0))
+                ).clicked() {
+                    state.show_export_modal = true;
+                    state.export_status_msg.clear();
+                }
+            });
         });
 
         ui.add_space(4.0);
@@ -169,7 +197,7 @@ pub fn render(
                                     if filtered_frames.is_empty() {
                                         ui.label("");
                                         ui.label("");
-                                        ui.label(RichText::new("No WebSocket frames captured yet.").size(11.0).color(TEXT_2));
+                                        ui.label(RichText::new("No WebSocket frames captured matching current filter.").size(11.0).color(TEXT_2));
                                         ui.label("");
                                         ui.label("");
                                         ui.label("");
@@ -177,65 +205,67 @@ pub fn render(
                                     }
 
                                     for frame in &filtered_frames {
-                                        let is_sel = state.selected_frame_id == Some(frame.id);
+                                        let is_selected = state.selected_frame_id == Some(frame.id);
 
-                                        // Entire row click detection
-                                        let row_id_str = format!("{}", frame.id);
-
-                                        // ID Column
-                                        if ui.add(egui::SelectableLabel::new(is_sel, RichText::new(&row_id_str).size(10.0).family(FontFamily::Monospace))).clicked() {
-                                            state.selected_frame_id = Some(frame.id);
-                                        }
-
-                                        // Time Column
-                                        if ui.add(egui::SelectableLabel::new(is_sel, RichText::new(&frame.timestamp).size(10.0).color(TEXT_2).family(FontFamily::Monospace))).clicked() {
-                                            state.selected_frame_id = Some(frame.id);
-                                        }
-
-                                        // Direction Column ⬆️ Client / ⬇️ Server
-                                        let (dir_str, dir_color) = match frame.direction {
-                                            WsDirection::ClientToServer => ("⬆️ Client", ACCENT_GREEN),
-                                            WsDirection::ServerToClient => ("⬇️ Server", ACCENT_BLUE),
-                                        };
-                                        if ui.add(egui::SelectableLabel::new(is_sel, RichText::new(dir_str).size(10.0).color(dir_color).strong())).clicked() {
-                                            state.selected_frame_id = Some(frame.id);
-                                        }
-
-                                        // Opcode Badge Column
-                                        let (op_bg, op_fg) = match frame.opcode {
-                                            WsOpcode::Text => (Color32::from_rgb(15, 40, 70), ACCENT_BLUE),
-                                            WsOpcode::Binary => (Color32::from_rgb(45, 20, 65), Color32::from_rgb(192, 132, 252)),
-                                            WsOpcode::Ping | WsOpcode::Pong => (Color32::from_rgb(60, 45, 10), ACCENT_AMBER),
-                                            WsOpcode::Close => (Color32::from_rgb(65, 15, 20), ACCENT_RED),
-                                            _ => (BG_RAISED, TEXT_2),
+                                        let (dir_icon, dir_color) = match frame.direction {
+                                            WsDirection::ClientToServer => ("⬆️ Client", ACCENT_BLUE),
+                                            WsDirection::ServerToClient => ("⬇️ Server", ACCENT_GREEN),
                                         };
 
-                                        let op_btn = egui::Frame::none()
-                                            .fill(op_bg)
-                                            .rounding(Rounding::same(3.0))
-                                            .inner_margin(egui::Margin::symmetric(5.0, 2.0))
-                                            .show(ui, |ui| {
-                                                ui.label(RichText::new(frame.opcode.label()).size(9.0).color(op_fg).strong().family(FontFamily::Monospace));
-                                            }).response;
+                                        let op_color = match frame.opcode {
+                                            WsOpcode::Text => TEXT_0,
+                                            WsOpcode::Binary => ACCENT_CYAN,
+                                            WsOpcode::Close => ACCENT_RED,
+                                            WsOpcode::Ping | WsOpcode::Pong => ACCENT_AMBER,
+                                            _ => TEXT_2,
+                                        };
 
-                                        if op_btn.clicked() {
+                                        if ui.add(
+                                            egui::SelectableLabel::new(is_selected, RichText::new(format!("{}", frame.id)).size(10.0).family(FontFamily::Monospace))
+                                        ).clicked() {
                                             state.selected_frame_id = Some(frame.id);
                                         }
 
-                                        // Length Column
-                                        if ui.add(egui::SelectableLabel::new(is_sel, RichText::new(format!("{} B", frame.length)).size(10.0).color(TEXT_2).family(FontFamily::Monospace))).clicked() {
-                                            state.selected_frame_id = Some(frame.id);
-                                        }
+                                        ui.label(RichText::new(&frame.timestamp).size(10.0).color(TEXT_2).family(FontFamily::Monospace));
+                                        ui.label(RichText::new(dir_icon).size(10.0).color(dir_color).strong());
+                                        ui.label(RichText::new(frame.opcode.label()).size(10.0).color(op_color).strong());
+                                        ui.label(RichText::new(format!("{} B", frame.length)).size(10.0).color(TEXT_2));
 
-                                        // Payload Preview Column
-                                        let preview = if frame.payload.len() > 70 {
-                                            format!("{}...", &frame.payload[..70])
+                                        let payload_short = if frame.payload.len() > 80 {
+                                            format!("{}...", &frame.payload[..80])
                                         } else {
                                             frame.payload.clone()
                                         };
-                                        if ui.add(egui::SelectableLabel::new(is_sel, RichText::new(preview).size(10.0).color(TEXT_0).family(FontFamily::Monospace))).clicked() {
-                                            state.selected_frame_id = Some(frame.id);
-                                        }
+
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new(&payload_short).size(10.0).color(TEXT_0).family(FontFamily::Monospace));
+
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if ui.add(
+                                                    egui::Button::new(RichText::new("➡️ Repeater").size(9.0).color(ACCENT_CYAN))
+                                                        .fill(BG_RAISED)
+                                                ).clicked() {
+                                                    // Send to Repeater tab
+                                                    let conn_url = connections
+                                                        .iter()
+                                                        .find(|c| c.id == frame.connection_id)
+                                                        .map(|c| c.url.clone())
+                                                        .unwrap_or_else(|| format!("WS #{}", frame.connection_id));
+
+                                                    let new_tab = WsRepeaterTab {
+                                                        name: format!("Repeater #{}", repeater_tabs.len() + 1),
+                                                        target_url: conn_url,
+                                                        is_connected: true,
+                                                        send_opcode: frame.opcode.clone(),
+                                                        payload_input: frame.payload.clone(),
+                                                        log_messages: vec![(*frame).clone()],
+                                                    };
+                                                    repeater_tabs.push(new_tab);
+                                                    *active_repeater_tab = repeater_tabs.len() - 1;
+                                                    *ws_sub_tab = WsSubTab::Repeater;
+                                                }
+                                            });
+                                        });
 
                                         ui.end_row();
                                     }
@@ -244,98 +274,55 @@ pub fn render(
                 });
             });
 
-        ui.add_space(4.0);
+        // ── Frame Inspector Panel (Bottom) ───────────────────────────
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            section_frame().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Frame Inspector").size(12.0).color(TEXT_0).strong());
 
-        // ── Bottom Panel: Frame Payload Inspector ──────────────────────
-        section_frame().show(ui, |ui| {
-            let selected_frame = frames.iter().find(|f| Some(f.id) == state.selected_frame_id);
-
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Frame Payload Inspector").size(12.0).color(TEXT_0).strong());
-                ui.add_space(12.0);
-
-                let modes = ["Raw Text", "Hex Dump", "Formatted JSON"];
-                for (idx, mode_name) in modes.iter().enumerate() {
-                    if ui.selectable_label(state.inspector_mode == idx, RichText::new(*mode_name).size(10.0)).clicked() {
-                        state.inspector_mode = idx;
+                    ui.add_space(10.0);
+                    let modes = ["Raw Text", "Hex Dump", "JSON Pretty"];
+                    for (idx, mode_name) in modes.iter().enumerate() {
+                        let active = state.inspector_mode == idx;
+                        if ui.add(egui::SelectableLabel::new(active, RichText::new(*mode_name).size(10.0))).clicked() {
+                            state.inspector_mode = idx;
+                        }
                     }
-                }
+                });
+
+                ui.separator();
+                ui.add_space(4.0);
+
+                let selected_frame = frames.iter().find(|f| Some(f.id) == state.selected_frame_id);
 
                 if let Some(frame) = selected_frame {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(
-                            egui::Button::new(RichText::new("🚀 Send to WS Repeater").size(11.0).color(TEXT_0).strong())
-                                .fill(ACCENT_BLUE)
-                                .rounding(Rounding::same(4.0))
-                        ).clicked() {
-                            let target_url = connections
-                                .iter()
-                                .find(|c| c.id == frame.connection_id)
-                                .map(|c| c.url.clone())
-                                .unwrap_or_else(|| "wss://echo.websocket.events".into());
+                    ScrollArea::vertical()
+                        .id_source("ws_inspector_scroll")
+                        .show(ui, |ui| {
+                            let content = match state.inspector_mode {
+                                0 => frame.payload.clone(),
+                                1 => format_hex_dump(&frame.payload_bytes),
+                                2 => {
+                                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&frame.payload) {
+                                        serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| frame.payload.clone())
+                                    } else {
+                                        "[Non-JSON Payload]\n".to_string() + &frame.payload
+                                    }
+                                }
+                                _ => frame.payload.clone(),
+                            };
 
-                            repeater_tabs.push(WsRepeaterTab {
-                                name: format!("WS Tab {}", repeater_tabs.len() + 1),
-                                target_url,
-                                is_connected: false,
-                                send_opcode: frame.opcode.clone(),
-                                payload_input: frame.payload.clone(),
-                                log_messages: vec![],
-                            });
-                            *active_repeater_tab = repeater_tabs.len() - 1;
-                            *ws_sub_tab = WsSubTab::Repeater;
-                        }
-                    });
+                            ui.add(
+                                egui::TextEdit::multiline(&mut content.as_str())
+                                    .font(egui::TextStyle::Monospace)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(8)
+                            );
+                        });
+                } else {
+                    ui.label(RichText::new("Select a frame from the stream table above to view detailed contents.").size(11.0).color(TEXT_2));
                 }
             });
-
-            ui.separator();
-            ui.add_space(4.0);
-
-            if let Some(frame) = selected_frame {
-                ScrollArea::vertical()
-                    .id_source("ws_inspector_scroll")
-                    .show(ui, |ui| {
-                        match state.inspector_mode {
-                            0 => {
-                                // Raw Text
-                                ui.add(
-                                    egui::TextEdit::multiline(&mut frame.payload.as_str())
-                                        .font(egui::TextStyle::Monospace)
-                                        .desired_width(f32::INFINITY)
-                                        .desired_rows(6)
-                                );
-                            }
-                            1 => {
-                                // Hex Dump
-                                let hex_dump = format_hex_dump(&frame.payload_bytes);
-                                ui.add(
-                                    egui::TextEdit::multiline(&mut hex_dump.as_str())
-                                        .font(egui::TextStyle::Monospace)
-                                        .desired_width(f32::INFINITY)
-                                        .desired_rows(6)
-                                );
-                            }
-                            _ => {
-                                // Formatted JSON
-                                let json_text = match serde_json::from_str::<serde_json::Value>(&frame.payload) {
-                                    Ok(val) => serde_json::to_string_pretty(&val).unwrap_or(frame.payload.clone()),
-                                    Err(_) => frame.payload.clone(),
-                                };
-                                ui.add(
-                                    egui::TextEdit::multiline(&mut json_text.as_str())
-                                        .font(egui::TextStyle::Monospace)
-                                        .desired_width(f32::INFINITY)
-                                        .desired_rows(6)
-                                );
-                            }
-                        }
-                    });
-            } else {
-                ui.add_space(20.0);
-                ui.label(RichText::new("Select a WebSocket frame from the table above to inspect its raw payload.").size(11.0).color(TEXT_2));
-                ui.add_space(20.0);
-            }
         });
     });
 }
@@ -343,21 +330,166 @@ pub fn render(
 fn format_hex_dump(bytes: &[u8]) -> String {
     let mut out = String::new();
     for (idx, chunk) in bytes.chunks(16).enumerate() {
-        out.push_str(&format!("{:04x}: ", idx * 16));
+        out.push_str(&format!("{:04X}  ", idx * 16));
         for b in chunk {
-            out.push_str(&format!("{:02x} ", b));
+            out.push_str(&format!("{:02X} ", b));
         }
-        if chunk.len() < 16 {
-            for _ in 0..(16 - chunk.len()) {
-                out.push_str("   ");
+        for _ in chunk.len()..16 {
+            out.push_str("   ");
+        }
+        out.push_str(" |");
+        for b in chunk {
+            if b.is_ascii_graphic() || *b == b' ' {
+                out.push(*b as char);
+            } else {
+                out.push('.');
             }
         }
-        out.push_str(" | ");
-        for b in chunk {
-            let ch = if b.is_ascii_graphic() || *b == b' ' { *b as char } else { '.' };
-            out.push(ch);
-        }
-        out.push('\n');
+        out.push_str("|\n");
     }
     out
+}
+
+fn render_ws_export_modal(
+    ctx: &egui::Context,
+    state: &mut WsHistoryState,
+    connections: &[WsConnection],
+    frames: &[WsFrameEntry],
+) {
+    if !state.show_export_modal {
+        return;
+    }
+
+    let mut is_open = state.show_export_modal;
+    egui::Window::new(RichText::new("📥 Export WebSocket Traffic History").size(14.0).color(TEXT_0).strong())
+        .open(&mut is_open)
+        .collapsible(false)
+        .resizable(false)
+        .default_size([520.0, 340.0])
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.label(RichText::new(format!("Export {} WebSocket connections and {} captured frames:", connections.len(), frames.len())).size(11.0).color(TEXT_2));
+            ui.separator();
+            ui.add_space(8.0);
+
+            // Option 1: JSON Export
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("1. JSON Format (.json)").size(12.0).color(ACCENT_CYAN).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(RichText::new("📂 Save JSON").size(11.0).color(ACCENT_GREEN)).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Export AJProxy WebSocket History (JSON)")
+                            .set_file_name("ajproxy_ws_history.json")
+                            .add_filter("JSON File", &["json"])
+                            .save_file()
+                        {
+                            #[derive(serde::Serialize)]
+                            struct WsExportData<'a> {
+                                connections: &'a [WsConnection],
+                                frames: &'a [WsFrameEntry],
+                            }
+                            let export_obj = WsExportData { connections, frames };
+                            let data = serde_json::to_string_pretty(&export_obj).unwrap_or_default();
+                            if let Ok(mut f) = File::create(&path) {
+                                let _ = f.write_all(data.as_bytes());
+                                state.export_status_msg = format!("✔ Saved: {}", path.to_string_lossy());
+                            }
+                        }
+                    }
+                });
+            });
+            ui.label(RichText::new("Structured JSON data including connection metadata and frame payloads.").size(10.0).color(TEXT_2));
+
+            ui.add_space(10.0);
+
+            // Option 2: CSV Export
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("2. CSV Spreadsheet (.csv)").size(12.0).color(ACCENT_CYAN).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(RichText::new("📂 Save CSV").size(11.0).color(ACCENT_GREEN)).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Export AJProxy WebSocket History (CSV)")
+                            .set_file_name("ajproxy_ws_history.csv")
+                            .add_filter("CSV File", &["csv"])
+                            .save_file()
+                        {
+                            let mut csv_buf = String::from("FrameID,Timestamp,ConnID,Direction,Opcode,Length,Payload\n");
+                            for f_entry in frames {
+                                let dir_str = match f_entry.direction {
+                                    WsDirection::ClientToServer => "Client->Server",
+                                    WsDirection::ServerToClient => "Server->Client",
+                                };
+                                let esc_payload = f_entry.payload.replace('"', "\"\"");
+                                csv_buf.push_str(&format!(
+                                    "\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"\n",
+                                    f_entry.id, f_entry.timestamp, f_entry.connection_id, dir_str, f_entry.opcode.label(), f_entry.length, esc_payload
+                                ));
+                            }
+                            if let Ok(mut f) = File::create(&path) {
+                                let _ = f.write_all(csv_buf.as_bytes());
+                                state.export_status_msg = format!("✔ Saved: {}", path.to_string_lossy());
+                            }
+                        }
+                    }
+                });
+            });
+            ui.label(RichText::new("Spreadsheet table format compatible with Excel and security analysis scripts.").size(10.0).color(TEXT_2));
+
+            ui.add_space(10.0);
+
+            // Option 3: Plain Text Log Export
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("3. Raw Text Log (.log)").size(12.0).color(ACCENT_CYAN).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(RichText::new("📂 Save LOG").size(11.0).color(ACCENT_GREEN)).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Export AJProxy WebSocket History (LOG)")
+                            .set_file_name("ajproxy_ws_history.log")
+                            .add_filter("Log File", &["log", "txt"])
+                            .save_file()
+                        {
+                            let mut log_buf = String::new();
+                            for conn in connections {
+                                log_buf.push_str(&format!("========================================================================\n"));
+                                log_buf.push_str(&format!("WEBSOCKET TUNNEL #{}: {} ({})\n", conn.id, conn.url, conn.status));
+                                log_buf.push_str(&format!("Connected At: {}\n\n", conn.connected_at));
+                            }
+                            log_buf.push_str(&format!("--- WEBSOCKET FRAMES LOG ({}) ---\n", frames.len()));
+                            for f_entry in frames {
+                                let dir_str = match f_entry.direction {
+                                    WsDirection::ClientToServer => "⬆️ Client -> Server",
+                                    WsDirection::ServerToClient => "⬇️ Server -> Client",
+                                };
+                                log_buf.push_str(&format!(
+                                    "[{}] Conn #{} {} | Opcode: {} | Length: {} B\n{}\n\n",
+                                    f_entry.timestamp, f_entry.connection_id, dir_str, f_entry.opcode.label(), f_entry.length, f_entry.payload
+                                ));
+                            }
+                            if let Ok(mut f) = File::create(&path) {
+                                let _ = f.write_all(log_buf.as_bytes());
+                                state.export_status_msg = format!("✔ Saved: {}", path.to_string_lossy());
+                            }
+                        }
+                    }
+                });
+            });
+            ui.label(RichText::new("Formatted text log suitable for penetration testing reports.").size(10.0).color(TEXT_2));
+
+            if !state.export_status_msg.is_empty() {
+                ui.add_space(10.0);
+                ui.label(RichText::new(&state.export_status_msg).size(11.0).color(ACCENT_GREEN).strong());
+            }
+
+            ui.add_space(12.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(RichText::new("Close").size(11.0).color(TEXT_0)).clicked() {
+                        state.show_export_modal = false;
+                    }
+                });
+            });
+        });
+    state.show_export_modal = is_open;
 }

@@ -137,6 +137,15 @@ pub fn get_ws_frames() -> Vec<WsFrameEntry> {
     }
 }
 
+pub fn clear_ws_history() {
+    if let Ok(mut lock) = WS_CONNECTIONS.lock() {
+        lock.clear();
+    }
+    if let Ok(mut lock) = WS_FRAMES.lock() {
+        lock.clear();
+    }
+}
+
 pub fn update_passthrough_hosts(hosts_csv: &str) {
     let hosts: Vec<String> = hosts_csv
         .split(',')
