@@ -48,10 +48,19 @@ fn format_ws_payload_preview(opcode_u8: u8, payload: &[u8]) -> String {
 }
 
 fn is_timeout_err(err: &std::io::Error) -> bool {
-    matches!(
+    if matches!(
         err.kind(),
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-    )
+    ) {
+        return true;
+    }
+    let msg = err.to_string().to_lowercase();
+    msg.contains("would block")
+        || msg.contains("wouldblock")
+        || msg.contains("want read")
+        || msg.contains("timed out")
+        || msg.contains("timeout")
+        || msg.contains("resource temporarily unavailable")
 }
 
 // ── TLS WebSocket Proxy Tunnel Handler ───────────────────────────────
@@ -81,11 +90,9 @@ pub fn handle_tls_websocket_tunnel(
     };
 
     if let Ok(server_tcp) = TcpStream::connect(&target_addr) {
-        // Set short socket timeouts to prevent deadlock on Mutex locks during blocking reads
-        let _ = server_tcp.set_read_timeout(Some(Duration::from_millis(100)));
-        let _ = server_tcp.set_write_timeout(Some(Duration::from_millis(100)));
-        let _ = tls_stream.get_ref().set_read_timeout(Some(Duration::from_millis(100)));
-        let _ = tls_stream.get_ref().set_write_timeout(Some(Duration::from_millis(100)));
+        // Set normal 10s timeout during HTTP 101 Handshake so server response is never prematurely cut off
+        let _ = server_tcp.set_read_timeout(Some(Duration::from_secs(10)));
+        let _ = server_tcp.set_write_timeout(Some(Duration::from_secs(10)));
 
         if let Ok(mut server_tls) = connector.connect(target_host, server_tcp) {
             let _ = server_tls.write_all(req_headers.as_bytes());
@@ -105,6 +112,12 @@ pub fn handle_tls_websocket_tunnel(
                     resp_headers = String::from_utf8_lossy(&handshake_buf[..n]).to_string();
                 }
             }
+
+            // Handshake complete! Set 200ms socket timeouts for full-duplex non-blocking frame proxying
+            let _ = server_tls.get_ref().set_read_timeout(Some(Duration::from_millis(200)));
+            let _ = server_tls.get_ref().set_write_timeout(Some(Duration::from_millis(200)));
+            let _ = tls_stream.get_ref().set_read_timeout(Some(Duration::from_millis(200)));
+            let _ = tls_stream.get_ref().set_write_timeout(Some(Duration::from_millis(200)));
 
             let conn_id = next_ws_conn_id();
 
@@ -163,7 +176,10 @@ pub fn handle_tls_websocket_tunnel(
 
                     let frame = match frame_res {
                         Ok(f) => f,
-                        Err(ref e) if is_timeout_err(e) => continue,
+                        Err(ref e) if is_timeout_err(e) => {
+                            thread::sleep(Duration::from_millis(5));
+                            continue;
+                        }
                         Err(_) => {
                             update_ws_conn_status(conn_id, "Closed (EOF)");
                             break;
@@ -271,7 +287,10 @@ pub fn handle_tls_websocket_tunnel(
 
                 let frame = match frame_res {
                     Ok(f) => f,
-                    Err(ref e) if is_timeout_err(e) => continue,
+                    Err(ref e) if is_timeout_err(e) => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
                     Err(_) => {
                         update_ws_conn_status(conn_id, "Closed (EOF)");
                         break;
@@ -402,10 +421,8 @@ pub fn handle_plain_websocket_tunnel(
 ) -> bool {
     let target_addr = if host.contains(':') { host.to_string() } else { format!("{}:80", host) };
     if let Ok(mut server_tcp) = TcpStream::connect(&target_addr) {
-        let _ = server_tcp.set_read_timeout(Some(Duration::from_millis(100)));
-        let _ = server_tcp.set_write_timeout(Some(Duration::from_millis(100)));
-        let _ = client_stream.set_read_timeout(Some(Duration::from_millis(100)));
-        let _ = client_stream.set_write_timeout(Some(Duration::from_millis(100)));
+        let _ = server_tcp.set_read_timeout(Some(Duration::from_secs(10)));
+        let _ = server_tcp.set_write_timeout(Some(Duration::from_secs(10)));
 
         let _ = server_tcp.write_all(req_headers.as_bytes());
         let _ = server_tcp.write_all(b"\r\n\r\n");
@@ -423,6 +440,11 @@ pub fn handle_plain_websocket_tunnel(
                 resp_headers = String::from_utf8_lossy(&handshake_buf[..n]).to_string();
             }
         }
+
+        let _ = server_tcp.set_read_timeout(Some(Duration::from_millis(200)));
+        let _ = server_tcp.set_write_timeout(Some(Duration::from_millis(200)));
+        let _ = client_stream.set_read_timeout(Some(Duration::from_millis(200)));
+        let _ = client_stream.set_write_timeout(Some(Duration::from_millis(200)));
 
         let conn_id = next_ws_conn_id();
 
@@ -474,7 +496,10 @@ pub fn handle_plain_websocket_tunnel(
                 let frame_res = read_ws_frame(&mut client_clone);
                 let frame = match frame_res {
                     Ok(f) => f,
-                    Err(ref e) if is_timeout_err(e) => continue,
+                    Err(ref e) if is_timeout_err(e) => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
                     Err(_) => {
                         update_ws_conn_status(conn_id, "Closed (EOF)");
                         break;
@@ -505,7 +530,7 @@ pub fn handle_plain_websocket_tunnel(
                         timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
                         direction: WsDirection::ClientToServer,
                         opcode: frame.to_opcode(),
-                        length: frame.payload.len(),
+                        length: reason.len(),
                         payload: reason,
                         payload_bytes: frame.payload.clone(),
                         is_final: true,
@@ -548,7 +573,10 @@ pub fn handle_plain_websocket_tunnel(
             let frame_res = read_ws_frame(&mut server_tcp);
             let frame = match frame_res {
                 Ok(f) => f,
-                Err(ref e) if is_timeout_err(e) => continue,
+                Err(ref e) if is_timeout_err(e) => {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
                 Err(_) => {
                     update_ws_conn_status(conn_id, "Closed (EOF)");
                     break;
@@ -593,7 +621,7 @@ pub fn handle_plain_websocket_tunnel(
                     timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
                     direction: WsDirection::ServerToClient,
                     opcode: frame.to_opcode(),
-                    length: frame.payload.len(),
+                    length: reason.len(),
                     payload: reason,
                     payload_bytes: frame.payload.clone(),
                     is_final: true,
