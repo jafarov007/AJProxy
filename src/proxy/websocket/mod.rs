@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::models::{HttpEntry, WsConnection, WsDirection, WsFrameEntry, WsOpcode};
 use crate::proxy::store::{
@@ -47,6 +47,13 @@ fn format_ws_payload_preview(opcode_u8: u8, payload: &[u8]) -> String {
     }
 }
 
+fn is_timeout_err(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
 // ── TLS WebSocket Proxy Tunnel Handler ───────────────────────────────
 
 pub fn handle_tls_websocket_tunnel(
@@ -74,6 +81,12 @@ pub fn handle_tls_websocket_tunnel(
     };
 
     if let Ok(server_tcp) = TcpStream::connect(&target_addr) {
+        // Set short socket timeouts to prevent deadlock on Mutex locks during blocking reads
+        let _ = server_tcp.set_read_timeout(Some(Duration::from_millis(100)));
+        let _ = server_tcp.set_write_timeout(Some(Duration::from_millis(100)));
+        let _ = tls_stream.get_ref().set_read_timeout(Some(Duration::from_millis(100)));
+        let _ = tls_stream.get_ref().set_write_timeout(Some(Duration::from_millis(100)));
+
         if let Ok(mut server_tls) = connector.connect(target_host, server_tcp) {
             let _ = server_tls.write_all(req_headers.as_bytes());
             let _ = server_tls.write_all(b"\r\n\r\n");
@@ -148,98 +161,99 @@ pub fn handle_tls_websocket_tunnel(
                         }
                     };
 
-                    match frame_res {
-                        Ok(frame) => {
-                            // Ping frame handling
-                            if frame.opcode_u8 == 0x9 {
-                                push_ws_frame(WsFrameEntry {
-                                    id: next_ws_frame_id(),
-                                    connection_id: conn_id,
-                                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                    direction: WsDirection::ClientToServer,
-                                    opcode: WsOpcode::Ping,
-                                    length: frame.payload.len(),
-                                    payload: format_ws_payload_preview(0x9, &frame.payload),
-                                    payload_bytes: frame.payload.clone(),
-                                    is_final: true,
-                                });
-                            }
-
-                            // Pong frame handling
-                            if frame.opcode_u8 == 0xA {
-                                push_ws_frame(WsFrameEntry {
-                                    id: next_ws_frame_id(),
-                                    connection_id: conn_id,
-                                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                    direction: WsDirection::ClientToServer,
-                                    opcode: WsOpcode::Pong,
-                                    length: frame.payload.len(),
-                                    payload: format_ws_payload_preview(0xA, &frame.payload),
-                                    payload_bytes: frame.payload.clone(),
-                                    is_final: true,
-                                });
-                            }
-
-                            // Close frame check
-                            if frame.opcode_u8 == 0x8 {
-                                let (code, reason) = parse_close_code(&frame.payload);
-                                update_ws_conn_status(conn_id, &format!("Closed ({})", code));
-                                reassembler.clear_connection(conn_id);
-
-                                push_ws_frame(WsFrameEntry {
-                                    id: next_ws_frame_id(),
-                                    connection_id: conn_id,
-                                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                    direction: WsDirection::ClientToServer,
-                                    opcode: frame.to_opcode(),
-                                    length: frame.payload.len(),
-                                    payload: reason,
-                                    payload_bytes: frame.payload.clone(),
-                                    is_final: true,
-                                });
-
-                                if let Ok(mut s) = s_clone.lock() {
-                                    let _ = write_ws_frame(&mut *s, &frame);
-                                }
-                                break;
-                            }
-
-                            // Intercept check
-                            let frame_to_send = match check_and_intercept_frame(conn_id, frame, WsDirection::ClientToServer) {
-                                Some(f) => f,
-                                None => continue, // Dropped
-                            };
-
-                            let payload_preview = format_ws_payload_preview(frame_to_send.opcode_u8, &frame_to_send.payload);
-
-                            if let Some(reassembled) = reassembler.process_frame(conn_id, frame_to_send.clone()) {
-                                if reassembled.opcode_u8 != 0x9 && reassembled.opcode_u8 != 0xA && reassembled.opcode_u8 != 0x8 {
-                                    push_ws_frame(WsFrameEntry {
-                                        id: next_ws_frame_id(),
-                                        connection_id: conn_id,
-                                        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                        direction: WsDirection::ClientToServer,
-                                        opcode: reassembled.to_opcode(),
-                                        length: reassembled.payload.len(),
-                                        payload: payload_preview,
-                                        payload_bytes: reassembled.payload,
-                                        is_final: reassembled.fin,
-                                    });
-                                }
-                            }
-
-                            if let Ok(mut s) = s_clone.lock() {
-                                if write_ws_frame(&mut *s, &frame_to_send).is_err() {
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
-                        }
+                    let frame = match frame_res {
+                        Ok(f) => f,
+                        Err(ref e) if is_timeout_err(e) => continue,
                         Err(_) => {
                             update_ws_conn_status(conn_id, "Closed (EOF)");
                             break;
                         }
+                    };
+
+                    // Ping frame handling
+                    if frame.opcode_u8 == 0x9 {
+                        push_ws_frame(WsFrameEntry {
+                            id: next_ws_frame_id(),
+                            connection_id: conn_id,
+                            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                            direction: WsDirection::ClientToServer,
+                            opcode: WsOpcode::Ping,
+                            length: frame.payload.len(),
+                            payload: format_ws_payload_preview(0x9, &frame.payload),
+                            payload_bytes: frame.payload.clone(),
+                            is_final: true,
+                        });
+                    }
+
+                    // Pong frame handling
+                    if frame.opcode_u8 == 0xA {
+                        push_ws_frame(WsFrameEntry {
+                            id: next_ws_frame_id(),
+                            connection_id: conn_id,
+                            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                            direction: WsDirection::ClientToServer,
+                            opcode: WsOpcode::Pong,
+                            length: frame.payload.len(),
+                            payload: format_ws_payload_preview(0xA, &frame.payload),
+                            payload_bytes: frame.payload.clone(),
+                            is_final: true,
+                        });
+                    }
+
+                    // Close frame check
+                    if frame.opcode_u8 == 0x8 {
+                        let (code, reason) = parse_close_code(&frame.payload);
+                        update_ws_conn_status(conn_id, &format!("Closed ({})", code));
+                        reassembler.clear_connection(conn_id);
+
+                        push_ws_frame(WsFrameEntry {
+                            id: next_ws_frame_id(),
+                            connection_id: conn_id,
+                            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                            direction: WsDirection::ClientToServer,
+                            opcode: frame.to_opcode(),
+                            length: frame.payload.len(),
+                            payload: reason,
+                            payload_bytes: frame.payload.clone(),
+                            is_final: true,
+                        });
+
+                        if let Ok(mut s) = s_clone.lock() {
+                            let _ = write_ws_frame(&mut *s, &frame);
+                        }
+                        break;
+                    }
+
+                    // Intercept check
+                    let frame_to_send = match check_and_intercept_frame(conn_id, frame, WsDirection::ClientToServer) {
+                        Some(f) => f,
+                        None => continue, // Dropped
+                    };
+
+                    let payload_preview = format_ws_payload_preview(frame_to_send.opcode_u8, &frame_to_send.payload);
+
+                    if let Some(reassembled) = reassembler.process_frame(conn_id, frame_to_send.clone()) {
+                        if reassembled.opcode_u8 != 0x9 && reassembled.opcode_u8 != 0xA && reassembled.opcode_u8 != 0x8 {
+                            push_ws_frame(WsFrameEntry {
+                                id: next_ws_frame_id(),
+                                connection_id: conn_id,
+                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                                direction: WsDirection::ClientToServer,
+                                opcode: reassembled.to_opcode(),
+                                length: reassembled.payload.len(),
+                                payload: payload_preview,
+                                payload_bytes: reassembled.payload,
+                                is_final: reassembled.fin,
+                            });
+                        }
+                    }
+
+                    if let Ok(mut s) = s_clone.lock() {
+                        if write_ws_frame(&mut *s, &frame_to_send).is_err() {
+                            break;
+                        }
+                    } else {
+                        break;
                     }
                 }
             });
@@ -255,114 +269,115 @@ pub fn handle_tls_websocket_tunnel(
                     }
                 };
 
-                match frame_res {
-                    Ok(frame) => {
-                        // Auto Ping -> Pong response
-                        if frame.opcode_u8 == 0x9 {
-                            push_ws_frame(WsFrameEntry {
-                                id: next_ws_frame_id(),
-                                connection_id: conn_id,
-                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                direction: WsDirection::ServerToClient,
-                                opcode: WsOpcode::Ping,
-                                length: frame.payload.len(),
-                                payload: format_ws_payload_preview(0x9, &frame.payload),
-                                payload_bytes: frame.payload.clone(),
-                                is_final: true,
-                            });
-
-                            let pong = build_pong_frame(&frame);
-                            if let Ok(mut s) = server_arc.lock() {
-                                let _ = write_ws_frame(&mut *s, &pong);
-                            }
-
-                            push_ws_frame(WsFrameEntry {
-                                id: next_ws_frame_id(),
-                                connection_id: conn_id,
-                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                direction: WsDirection::ClientToServer,
-                                opcode: WsOpcode::Pong,
-                                length: pong.payload.len(),
-                                payload: format_ws_payload_preview(0xA, &pong.payload),
-                                payload_bytes: pong.payload.clone(),
-                                is_final: true,
-                            });
-                        }
-
-                        // Pong frame check
-                        if frame.opcode_u8 == 0xA {
-                            push_ws_frame(WsFrameEntry {
-                                id: next_ws_frame_id(),
-                                connection_id: conn_id,
-                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                direction: WsDirection::ServerToClient,
-                                opcode: WsOpcode::Pong,
-                                length: frame.payload.len(),
-                                payload: format_ws_payload_preview(0xA, &frame.payload),
-                                payload_bytes: frame.payload.clone(),
-                                is_final: true,
-                            });
-                        }
-
-                        // Close frame check
-                        if frame.opcode_u8 == 0x8 {
-                            let (code, reason) = parse_close_code(&frame.payload);
-                            update_ws_conn_status(conn_id, &format!("Closed ({})", code));
-
-                            push_ws_frame(WsFrameEntry {
-                                id: next_ws_frame_id(),
-                                connection_id: conn_id,
-                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                direction: WsDirection::ServerToClient,
-                                opcode: frame.to_opcode(),
-                                length: frame.payload.len(),
-                                payload: reason,
-                                payload_bytes: frame.payload.clone(),
-                                is_final: true,
-                            });
-
-                            if let Ok(mut c) = client_arc.lock() {
-                                let _ = write_ws_frame(&mut *c, &frame);
-                            }
-                            break;
-                        }
-
-                        // Intercept check
-                        let frame_to_send = match check_and_intercept_frame(conn_id, frame, WsDirection::ServerToClient) {
-                            Some(f) => f,
-                            None => continue, // Dropped
-                        };
-
-                        let payload_preview = format_ws_payload_preview(frame_to_send.opcode_u8, &frame_to_send.payload);
-
-                        if let Some(reassembled) = reassembler.process_frame(conn_id, frame_to_send.clone()) {
-                            if reassembled.opcode_u8 != 0x9 && reassembled.opcode_u8 != 0xA && reassembled.opcode_u8 != 0x8 {
-                                push_ws_frame(WsFrameEntry {
-                                    id: next_ws_frame_id(),
-                                    connection_id: conn_id,
-                                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                    direction: WsDirection::ServerToClient,
-                                    opcode: reassembled.to_opcode(),
-                                    length: reassembled.payload.len(),
-                                    payload: payload_preview,
-                                    payload_bytes: reassembled.payload,
-                                    is_final: reassembled.fin,
-                                });
-                            }
-                        }
-
-                        if let Ok(mut c) = client_arc.lock() {
-                            if write_ws_frame(&mut *c, &frame_to_send).is_err() {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
+                let frame = match frame_res {
+                    Ok(f) => f,
+                    Err(ref e) if is_timeout_err(e) => continue,
                     Err(_) => {
                         update_ws_conn_status(conn_id, "Closed (EOF)");
                         break;
                     }
+                };
+
+                // Auto Ping -> Pong response
+                if frame.opcode_u8 == 0x9 {
+                    push_ws_frame(WsFrameEntry {
+                        id: next_ws_frame_id(),
+                        connection_id: conn_id,
+                        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                        direction: WsDirection::ServerToClient,
+                        opcode: WsOpcode::Ping,
+                        length: frame.payload.len(),
+                        payload: format_ws_payload_preview(0x9, &frame.payload),
+                        payload_bytes: frame.payload.clone(),
+                        is_final: true,
+                    });
+
+                    let pong = build_pong_frame(&frame);
+                    if let Ok(mut s) = server_arc.lock() {
+                        let _ = write_ws_frame(&mut *s, &pong);
+                    }
+
+                    push_ws_frame(WsFrameEntry {
+                        id: next_ws_frame_id(),
+                        connection_id: conn_id,
+                        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                        direction: WsDirection::ClientToServer,
+                        opcode: WsOpcode::Pong,
+                        length: pong.payload.len(),
+                        payload: format_ws_payload_preview(0xA, &pong.payload),
+                        payload_bytes: pong.payload.clone(),
+                        is_final: true,
+                    });
+                }
+
+                // Pong frame check
+                if frame.opcode_u8 == 0xA {
+                    push_ws_frame(WsFrameEntry {
+                        id: next_ws_frame_id(),
+                        connection_id: conn_id,
+                        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                        direction: WsDirection::ServerToClient,
+                        opcode: WsOpcode::Pong,
+                        length: frame.payload.len(),
+                        payload: format_ws_payload_preview(0xA, &frame.payload),
+                        payload_bytes: frame.payload.clone(),
+                        is_final: true,
+                    });
+                }
+
+                // Close frame check
+                if frame.opcode_u8 == 0x8 {
+                    let (code, reason) = parse_close_code(&frame.payload);
+                    update_ws_conn_status(conn_id, &format!("Closed ({})", code));
+
+                    push_ws_frame(WsFrameEntry {
+                        id: next_ws_frame_id(),
+                        connection_id: conn_id,
+                        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                        direction: WsDirection::ServerToClient,
+                        opcode: frame.to_opcode(),
+                        length: frame.payload.len(),
+                        payload: reason,
+                        payload_bytes: frame.payload.clone(),
+                        is_final: true,
+                    });
+
+                    if let Ok(mut c) = client_arc.lock() {
+                        let _ = write_ws_frame(&mut *c, &frame);
+                    }
+                    break;
+                }
+
+                // Intercept check
+                let frame_to_send = match check_and_intercept_frame(conn_id, frame, WsDirection::ServerToClient) {
+                    Some(f) => f,
+                    None => continue, // Dropped
+                };
+
+                let payload_preview = format_ws_payload_preview(frame_to_send.opcode_u8, &frame_to_send.payload);
+
+                if let Some(reassembled) = reassembler.process_frame(conn_id, frame_to_send.clone()) {
+                    if reassembled.opcode_u8 != 0x9 && reassembled.opcode_u8 != 0xA && reassembled.opcode_u8 != 0x8 {
+                        push_ws_frame(WsFrameEntry {
+                            id: next_ws_frame_id(),
+                            connection_id: conn_id,
+                            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                            direction: WsDirection::ServerToClient,
+                            opcode: reassembled.to_opcode(),
+                            length: reassembled.payload.len(),
+                            payload: payload_preview,
+                            payload_bytes: reassembled.payload,
+                            is_final: reassembled.fin,
+                        });
+                    }
+                }
+
+                if let Ok(mut c) = client_arc.lock() {
+                    if write_ws_frame(&mut *c, &frame_to_send).is_err() {
+                        break;
+                    }
+                } else {
+                    break;
                 }
             }
 
@@ -387,6 +402,11 @@ pub fn handle_plain_websocket_tunnel(
 ) -> bool {
     let target_addr = if host.contains(':') { host.to_string() } else { format!("{}:80", host) };
     if let Ok(mut server_tcp) = TcpStream::connect(&target_addr) {
+        let _ = server_tcp.set_read_timeout(Some(Duration::from_millis(100)));
+        let _ = server_tcp.set_write_timeout(Some(Duration::from_millis(100)));
+        let _ = client_stream.set_read_timeout(Some(Duration::from_millis(100)));
+        let _ = client_stream.set_write_timeout(Some(Duration::from_millis(100)));
+
         let _ = server_tcp.write_all(req_headers.as_bytes());
         let _ = server_tcp.write_all(b"\r\n\r\n");
         if !req_body.is_empty() {
@@ -451,158 +471,162 @@ pub fn handle_plain_websocket_tunnel(
         let h1 = thread::spawn(move || {
             let mut reassembler = FrameReassembler::new();
             loop {
-                match read_ws_frame(&mut client_clone) {
-                    Ok(frame) => {
-                        // Ping / Pong frame check
-                        if frame.opcode_u8 == 0x9 || frame.opcode_u8 == 0xA {
-                            push_ws_frame(WsFrameEntry {
-                                id: next_ws_frame_id(),
-                                connection_id: conn_id,
-                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                direction: WsDirection::ClientToServer,
-                                opcode: frame.to_opcode(),
-                                length: frame.payload.len(),
-                                payload: format_ws_payload_preview(frame.opcode_u8, &frame.payload),
-                                payload_bytes: frame.payload.clone(),
-                                is_final: true,
-                            });
-                        }
-
-                        if frame.opcode_u8 == 0x8 {
-                            let (code, reason) = parse_close_code(&frame.payload);
-                            update_ws_conn_status(conn_id, &format!("Closed ({})", code));
-                            push_ws_frame(WsFrameEntry {
-                                id: next_ws_frame_id(),
-                                connection_id: conn_id,
-                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                direction: WsDirection::ClientToServer,
-                                opcode: frame.to_opcode(),
-                                length: frame.payload.len(),
-                                payload: reason,
-                                payload_bytes: frame.payload.clone(),
-                                is_final: true,
-                            });
-                            let _ = write_ws_frame(&mut server_clone, &frame);
-                            break;
-                        }
-
-                        let frame_to_send = match check_and_intercept_frame(conn_id, frame, WsDirection::ClientToServer) {
-                            Some(f) => f,
-                            None => continue,
-                        };
-
-                        let payload_preview = format_ws_payload_preview(frame_to_send.opcode_u8, &frame_to_send.payload);
-
-                        if let Some(reassembled) = reassembler.process_frame(conn_id, frame_to_send.clone()) {
-                            if reassembled.opcode_u8 != 0x9 && reassembled.opcode_u8 != 0xA && reassembled.opcode_u8 != 0x8 {
-                                push_ws_frame(WsFrameEntry {
-                                    id: next_ws_frame_id(),
-                                    connection_id: conn_id,
-                                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                    direction: WsDirection::ClientToServer,
-                                    opcode: reassembled.to_opcode(),
-                                    length: reassembled.payload.len(),
-                                    payload: payload_preview,
-                                    payload_bytes: reassembled.payload,
-                                    is_final: reassembled.fin,
-                                });
-                            }
-                        }
-
-                        if write_ws_frame(&mut server_clone, &frame_to_send).is_err() {
-                            break;
-                        }
-                    }
+                let frame_res = read_ws_frame(&mut client_clone);
+                let frame = match frame_res {
+                    Ok(f) => f,
+                    Err(ref e) if is_timeout_err(e) => continue,
                     Err(_) => {
                         update_ws_conn_status(conn_id, "Closed (EOF)");
                         break;
                     }
+                };
+
+                // Ping / Pong frame check
+                if frame.opcode_u8 == 0x9 || frame.opcode_u8 == 0xA {
+                    push_ws_frame(WsFrameEntry {
+                        id: next_ws_frame_id(),
+                        connection_id: conn_id,
+                        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                        direction: WsDirection::ClientToServer,
+                        opcode: frame.to_opcode(),
+                        length: frame.payload.len(),
+                        payload: format_ws_payload_preview(frame.opcode_u8, &frame.payload),
+                        payload_bytes: frame.payload.clone(),
+                        is_final: true,
+                    });
+                }
+
+                if frame.opcode_u8 == 0x8 {
+                    let (code, reason) = parse_close_code(&frame.payload);
+                    update_ws_conn_status(conn_id, &format!("Closed ({})", code));
+                    push_ws_frame(WsFrameEntry {
+                        id: next_ws_frame_id(),
+                        connection_id: conn_id,
+                        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                        direction: WsDirection::ClientToServer,
+                        opcode: frame.to_opcode(),
+                        length: frame.payload.len(),
+                        payload: reason,
+                        payload_bytes: frame.payload.clone(),
+                        is_final: true,
+                    });
+                    let _ = write_ws_frame(&mut server_clone, &frame);
+                    break;
+                }
+
+                let frame_to_send = match check_and_intercept_frame(conn_id, frame, WsDirection::ClientToServer) {
+                    Some(f) => f,
+                    None => continue,
+                };
+
+                let payload_preview = format_ws_payload_preview(frame_to_send.opcode_u8, &frame_to_send.payload);
+
+                if let Some(reassembled) = reassembler.process_frame(conn_id, frame_to_send.clone()) {
+                    if reassembled.opcode_u8 != 0x9 && reassembled.opcode_u8 != 0xA && reassembled.opcode_u8 != 0x8 {
+                        push_ws_frame(WsFrameEntry {
+                            id: next_ws_frame_id(),
+                            connection_id: conn_id,
+                            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                            direction: WsDirection::ClientToServer,
+                            opcode: reassembled.to_opcode(),
+                            length: reassembled.payload.len(),
+                            payload: payload_preview,
+                            payload_bytes: reassembled.payload,
+                            is_final: reassembled.fin,
+                        });
+                    }
+                }
+
+                if write_ws_frame(&mut server_clone, &frame_to_send).is_err() {
+                    break;
                 }
             }
         });
 
         let mut reassembler = FrameReassembler::new();
         loop {
-            match read_ws_frame(&mut server_tcp) {
-                Ok(frame) => {
-                    if frame.opcode_u8 == 0x9 {
-                        push_ws_frame(WsFrameEntry {
-                            id: next_ws_frame_id(),
-                            connection_id: conn_id,
-                            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                            direction: WsDirection::ServerToClient,
-                            opcode: WsOpcode::Ping,
-                            length: frame.payload.len(),
-                            payload: format_ws_payload_preview(0x9, &frame.payload),
-                            payload_bytes: frame.payload.clone(),
-                            is_final: true,
-                        });
-
-                        let pong = build_pong_frame(&frame);
-                        let _ = write_ws_frame(client_stream, &pong);
-
-                        push_ws_frame(WsFrameEntry {
-                            id: next_ws_frame_id(),
-                            connection_id: conn_id,
-                            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                            direction: WsDirection::ClientToServer,
-                            opcode: WsOpcode::Pong,
-                            length: pong.payload.len(),
-                            payload: format_ws_payload_preview(0xA, &pong.payload),
-                            payload_bytes: pong.payload.clone(),
-                            is_final: true,
-                        });
-                    }
-
-                    if frame.opcode_u8 == 0x8 {
-                        let (code, reason) = parse_close_code(&frame.payload);
-                        update_ws_conn_status(conn_id, &format!("Closed ({})", code));
-                        push_ws_frame(WsFrameEntry {
-                            id: next_ws_frame_id(),
-                            connection_id: conn_id,
-                            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                            direction: WsDirection::ServerToClient,
-                            opcode: frame.to_opcode(),
-                            length: frame.payload.len(),
-                            payload: reason,
-                            payload_bytes: frame.payload.clone(),
-                            is_final: true,
-                        });
-                        let _ = write_ws_frame(client_stream, &frame);
-                        break;
-                    }
-
-                    let frame_to_send = match check_and_intercept_frame(conn_id, frame, WsDirection::ServerToClient) {
-                        Some(f) => f,
-                        None => continue,
-                    };
-
-                    let payload_preview = format_ws_payload_preview(frame_to_send.opcode_u8, &frame_to_send.payload);
-
-                    if let Some(reassembled) = reassembler.process_frame(conn_id, frame_to_send.clone()) {
-                        if reassembled.opcode_u8 != 0x9 && reassembled.opcode_u8 != 0xA && reassembled.opcode_u8 != 0x8 {
-                            push_ws_frame(WsFrameEntry {
-                                id: next_ws_frame_id(),
-                                connection_id: conn_id,
-                                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                                direction: WsDirection::ServerToClient,
-                                opcode: reassembled.to_opcode(),
-                                length: reassembled.payload.len(),
-                                payload: payload_preview,
-                                payload_bytes: reassembled.payload,
-                                is_final: reassembled.fin,
-                            });
-                        }
-                    }
-
-                    if write_ws_frame(client_stream, &frame_to_send).is_err() {
-                        break;
-                    }
-                }
+            let frame_res = read_ws_frame(&mut server_tcp);
+            let frame = match frame_res {
+                Ok(f) => f,
+                Err(ref e) if is_timeout_err(e) => continue,
                 Err(_) => {
                     update_ws_conn_status(conn_id, "Closed (EOF)");
                     break;
                 }
+            };
+
+            if frame.opcode_u8 == 0x9 {
+                push_ws_frame(WsFrameEntry {
+                    id: next_ws_frame_id(),
+                    connection_id: conn_id,
+                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                    direction: WsDirection::ServerToClient,
+                    opcode: WsOpcode::Ping,
+                    length: frame.payload.len(),
+                    payload: format_ws_payload_preview(0x9, &frame.payload),
+                    payload_bytes: frame.payload.clone(),
+                    is_final: true,
+                });
+
+                let pong = build_pong_frame(&frame);
+                let _ = write_ws_frame(client_stream, &pong);
+
+                push_ws_frame(WsFrameEntry {
+                    id: next_ws_frame_id(),
+                    connection_id: conn_id,
+                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                    direction: WsDirection::ClientToServer,
+                    opcode: WsOpcode::Pong,
+                    length: pong.payload.len(),
+                    payload: format_ws_payload_preview(0xA, &pong.payload),
+                    payload_bytes: pong.payload.clone(),
+                    is_final: true,
+                });
+            }
+
+            if frame.opcode_u8 == 0x8 {
+                let (code, reason) = parse_close_code(&frame.payload);
+                update_ws_conn_status(conn_id, &format!("Closed ({})", code));
+                push_ws_frame(WsFrameEntry {
+                    id: next_ws_frame_id(),
+                    connection_id: conn_id,
+                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                    direction: WsDirection::ServerToClient,
+                    opcode: frame.to_opcode(),
+                    length: frame.payload.len(),
+                    payload: reason,
+                    payload_bytes: frame.payload.clone(),
+                    is_final: true,
+                });
+                let _ = write_ws_frame(client_stream, &frame);
+                break;
+            }
+
+            let frame_to_send = match check_and_intercept_frame(conn_id, frame, WsDirection::ServerToClient) {
+                Some(f) => f,
+                None => continue,
+            };
+
+            let payload_preview = format_ws_payload_preview(frame_to_send.opcode_u8, &frame_to_send.payload);
+
+            if let Some(reassembled) = reassembler.process_frame(conn_id, frame_to_send.clone()) {
+                if reassembled.opcode_u8 != 0x9 && reassembled.opcode_u8 != 0xA && reassembled.opcode_u8 != 0x8 {
+                    push_ws_frame(WsFrameEntry {
+                        id: next_ws_frame_id(),
+                        connection_id: conn_id,
+                        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                        direction: WsDirection::ServerToClient,
+                        opcode: reassembled.to_opcode(),
+                        length: reassembled.payload.len(),
+                        payload: payload_preview,
+                        payload_bytes: reassembled.payload,
+                        is_final: reassembled.fin,
+                    });
+                }
+            }
+
+            if write_ws_frame(client_stream, &frame_to_send).is_err() {
+                break;
             }
         }
 

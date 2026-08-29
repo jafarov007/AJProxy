@@ -115,8 +115,37 @@ pub fn render(
                     }
                 });
 
-            // Input URL for standalone
-            if !active_conns.iter().any(|c| c.url == tab.target_url) {
+            // Active Tunnel controls vs. Standalone socket controls
+            let matched_conn = active_conns.iter().find(|c| c.url == tab.target_url);
+
+            if let Some(conn) = matched_conn {
+                tab.is_connected = conn.status.starts_with("Active");
+                if tab.is_connected {
+                    if ui.add(
+                        egui::Button::new(RichText::new("❌ Terminate Tunnel").size(11.0).color(ACCENT_RED).strong())
+                            .fill(Color32::from_rgb(60, 15, 20))
+                            .rounding(Rounding::same(4.0))
+                    ).clicked() {
+                        crate::proxy::store::update_ws_conn_status(conn.id, "Closed (User Action)");
+                        tab.is_connected = false;
+
+                        let close_msg = WsFrameEntry {
+                            id: tab.log_messages.len() as u64 + 1,
+                            connection_id: conn.id,
+                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            direction: WsDirection::ClientToServer,
+                            opcode: WsOpcode::Close,
+                            length: 2,
+                            payload: "Normal Closure (1000)".into(),
+                            payload_bytes: vec![0x03, 0xE8],
+                            is_final: true,
+                        };
+                        crate::proxy::store::push_ws_frame(close_msg.clone());
+                        tab.log_messages.push(close_msg);
+                    }
+                }
+            } else {
+                // Standalone mode controls
                 ui.add_space(8.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut tab.target_url)
@@ -149,8 +178,6 @@ pub fn render(
                         is_final: true,
                     });
                 }
-            } else {
-                tab.is_connected = active_conns.iter().find(|c| c.url == tab.target_url).map(|c| c.status.starts_with("Active")).unwrap_or(false);
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

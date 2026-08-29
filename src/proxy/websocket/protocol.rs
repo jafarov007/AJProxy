@@ -70,29 +70,53 @@ pub fn build_pong_frame(ping_frame: &WsRawFrame) -> WsRawFrame {
     }
 }
 
-/// Parses a single RFC 6455 frame from any std::io::Read stream
-pub fn read_ws_frame<R: Read>(reader: &mut R) -> std::io::Result<WsRawFrame> {
-    let mut header = [0u8; 2];
-    reader.read_exact(&mut header)?;
+fn read_exact_blocking<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<()> {
+    let mut offset = 0;
+    while offset < buf.len() {
+        match reader.read(&mut buf[offset..]) {
+            Ok(0) => return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Unexpected EOF")),
+            Ok(n) => offset += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
 
-    let fin = (header[0] & 0x80) != 0;
-    let opcode_u8 = header[0] & 0x0F;
-    let masked = (header[1] & 0x80) != 0;
-    let mut payload_len = (header[1] & 0x7F) as u64;
+/// Parses a single RFC 6455 frame from any std::io::Read stream.
+/// Safe against socket timeouts: returns WouldBlock ONLY if byte 0 has not yet arrived.
+pub fn read_ws_frame<R: Read>(reader: &mut R) -> std::io::Result<WsRawFrame> {
+    let mut first_byte = [0u8; 1];
+    let n = reader.read(&mut first_byte)?;
+    if n == 0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF"));
+    }
+
+    let fin = (first_byte[0] & 0x80) != 0;
+    let opcode_u8 = first_byte[0] & 0x0F;
+
+    let mut second_byte = [0u8; 1];
+    read_exact_blocking(reader, &mut second_byte)?;
+
+    let masked = (second_byte[0] & 0x80) != 0;
+    let mut payload_len = (second_byte[0] & 0x7F) as u64;
 
     if payload_len == 126 {
         let mut ext = [0u8; 2];
-        reader.read_exact(&mut ext)?;
+        read_exact_blocking(reader, &mut ext)?;
         payload_len = u16::from_be_bytes(ext) as u64;
     } else if payload_len == 127 {
         let mut ext = [0u8; 8];
-        reader.read_exact(&mut ext)?;
+        read_exact_blocking(reader, &mut ext)?;
         payload_len = u64::from_be_bytes(ext);
     }
 
     let mask_key = if masked {
         let mut key = [0u8; 4];
-        reader.read_exact(&mut key)?;
+        read_exact_blocking(reader, &mut key)?;
         Some(key)
     } else {
         None
@@ -100,7 +124,7 @@ pub fn read_ws_frame<R: Read>(reader: &mut R) -> std::io::Result<WsRawFrame> {
 
     let mut payload = vec![0u8; payload_len as usize];
     if payload_len > 0 {
-        reader.read_exact(&mut payload)?;
+        read_exact_blocking(reader, &mut payload)?;
     }
 
     // Unmask payload in-place
