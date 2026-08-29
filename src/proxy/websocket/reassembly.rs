@@ -44,6 +44,7 @@ impl FrameReassembler {
         }
     }
 
+    #[allow(dead_code)]
     pub fn clear_connection(&mut self, conn_id: u32) {
         self.buffers.remove(&conn_id);
     }
