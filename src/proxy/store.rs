@@ -61,6 +61,7 @@ pub struct PendingWsFrame {
     pub connection_id: u32,
     pub direction: crate::models::WsDirection,
     pub opcode: crate::models::WsOpcode,
+    pub raw_opcode_u8: u8,
     pub payload: String,
     pub payload_bytes: Vec<u8>,
     pub responder: Arc<Mutex<Option<Sender<Option<crate::proxy::websocket::protocol::WsRawFrame>>>>>,

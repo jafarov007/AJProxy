@@ -64,7 +64,7 @@ pub fn render(
             );
         }
         WsSubTab::Intercept => {
-            intercept::render(ui, intercept_state);
+            intercept::render(ui, intercept_state, repeater_tabs, active_repeater_tab, ws_sub_tab);
         }
         WsSubTab::Repeater => {
             repeater::render(ui, repeater_tabs, active_repeater_tab);

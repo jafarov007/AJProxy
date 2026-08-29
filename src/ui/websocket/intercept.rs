@@ -4,7 +4,48 @@ use crate::theme::*;
 use crate::proxy::store::{PENDING_WS_FRAMES, set_ws_intercept_enabled, PendingWsFrame};
 use crate::proxy::websocket::protocol::WsRawFrame;
 
-pub fn render(ui: &mut egui::Ui, state: &mut WsInterceptState) {
+fn build_raw_frame(opcode: &WsOpcode, payload_text: &str, _raw_bytes: &[u8], fallback_opcode_u8: u8) -> WsRawFrame {
+    let opcode_u8 = match opcode {
+        WsOpcode::Text => 0x1,
+        WsOpcode::Binary => 0x2,
+        WsOpcode::Close => 0x8,
+        WsOpcode::Ping => 0x9,
+        WsOpcode::Pong => 0xA,
+        WsOpcode::Continuation => 0x0,
+        WsOpcode::Unknown(_) => fallback_opcode_u8,
+    };
+
+    let payload = match opcode {
+        WsOpcode::Binary => {
+            let clean_hex: String = payload_text.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            if clean_hex.len() % 2 == 0 && !clean_hex.is_empty() {
+                (0..clean_hex.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&clean_hex[i..i + 2], 16).unwrap_or(0))
+                    .collect()
+            } else {
+                payload_text.as_bytes().to_vec()
+            }
+        }
+        _ => payload_text.as_bytes().to_vec(),
+    };
+
+    WsRawFrame {
+        fin: true,
+        opcode_u8,
+        masked: false,
+        mask_key: None,
+        payload,
+    }
+}
+
+pub fn render(
+    ui: &mut egui::Ui,
+    state: &mut WsInterceptState,
+    repeater_tabs: &mut Vec<WsRepeaterTab>,
+    active_repeater_tab: &mut usize,
+    ws_sub_tab: &mut WsSubTab,
+) {
     let pending_count = if let Ok(lock) = PENDING_WS_FRAMES.lock() {
         lock.len()
     } else {
@@ -78,23 +119,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut WsInterceptState) {
     if action_forward_all {
         if let Ok(mut lock) = PENDING_WS_FRAMES.lock() {
             for pending in lock.drain(..) {
-                let default_frame = WsRawFrame {
-                    fin: true,
-                    opcode_u8: match pending.opcode {
-                        WsOpcode::Text => 0x1,
-                        WsOpcode::Binary => 0x2,
-                        WsOpcode::Close => 0x8,
-                        WsOpcode::Ping => 0x9,
-                        WsOpcode::Pong => 0xA,
-                        _ => 0x1,
-                    },
-                    masked: false,
-                    mask_key: None,
-                    payload: pending.payload_bytes,
-                };
+                let frame = build_raw_frame(&pending.opcode, &pending.payload, &pending.payload_bytes, pending.raw_opcode_u8);
                 if let Ok(mut r_lock) = pending.responder.lock() {
                     if let Some(sender) = r_lock.take() {
-                        let _ = sender.send(Some(default_frame));
+                        let _ = sender.send(Some(frame));
                     }
                 }
             }
@@ -257,6 +285,27 @@ pub fn render(ui: &mut egui::Ui, state: &mut WsInterceptState) {
                         ).clicked() {
                             action_drop_selected = true;
                         }
+
+                        ui.add_space(4.0);
+
+                        // Feature: Send to Repeater from Intercept!
+                        if ui.add(
+                            egui::Button::new(RichText::new("➡️ Repeater").size(11.0).color(ACCENT_CYAN).strong())
+                                .fill(BG_RAISED)
+                                .rounding(Rounding::same(4.0))
+                        ).clicked() {
+                            let new_tab = WsRepeaterTab {
+                                name: format!("Repeater #{}", repeater_tabs.len() + 1),
+                                target_url: format!("WS #{}", pending.connection_id),
+                                is_connected: true,
+                                send_opcode: state.edited_opcode.clone(),
+                                payload_input: state.edited_payload.clone(),
+                                log_messages: vec![],
+                            };
+                            repeater_tabs.push(new_tab);
+                            *active_repeater_tab = repeater_tabs.len() - 1;
+                            *ws_sub_tab = WsSubTab::Repeater;
+                        }
                     });
                 });
 
@@ -273,7 +322,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut WsInterceptState) {
 
                         ui.label(RichText::new("Opcode:").size(11.0).color(TEXT_1).strong());
                         ui.horizontal(|ui| {
-                            let opcodes = [WsOpcode::Text, WsOpcode::Binary, WsOpcode::Ping, WsOpcode::Pong, WsOpcode::Close];
+                            let opcodes = [WsOpcode::Text, WsOpcode::Binary, WsOpcode::Ping, WsOpcode::Pong, WsOpcode::Close, WsOpcode::Continuation];
                             for op in opcodes {
                                 if ui.selectable_label(state.edited_opcode == op, RichText::new(op.label()).size(10.0)).clicked() {
                                     state.edited_opcode = op;
@@ -320,35 +369,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut WsInterceptState) {
 
             if let Some(sender) = sender_opt {
                 if action_forward_selected {
-                    let opcode_u8 = match state.edited_opcode {
-                        WsOpcode::Text => 0x1,
-                        WsOpcode::Binary => 0x2,
-                        WsOpcode::Close => 0x8,
-                        WsOpcode::Ping => 0x9,
-                        WsOpcode::Pong => 0xA,
-                        _ => 0x1,
-                    };
-                    let payload_bytes = match state.edited_opcode {
-                        WsOpcode::Binary => {
-                            let clean_hex: String = state.edited_payload.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-                            if clean_hex.len() % 2 == 0 && !clean_hex.is_empty() {
-                                (0..clean_hex.len())
-                                    .step_by(2)
-                                    .map(|i| u8::from_str_radix(&clean_hex[i..i + 2], 16).unwrap_or(0))
-                                    .collect()
-                            } else {
-                                state.edited_payload.as_bytes().to_vec()
-                            }
-                        }
-                        _ => state.edited_payload.as_bytes().to_vec(),
-                    };
-                    let modified_frame = WsRawFrame {
-                        fin: true,
-                        opcode_u8,
-                        masked: false,
-                        mask_key: None,
-                        payload: payload_bytes,
-                    };
+                    let modified_frame = build_raw_frame(&state.edited_opcode, &state.edited_payload, &pending.payload_bytes, pending.raw_opcode_u8);
                     let _ = sender.send(Some(modified_frame));
                 } else if action_drop_selected {
                     let _ = sender.send(None);

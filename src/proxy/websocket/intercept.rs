@@ -25,6 +25,7 @@ pub fn check_and_intercept_frame(
         connection_id: conn_id,
         direction,
         opcode: frame.to_opcode(),
+        raw_opcode_u8: frame.opcode_u8,
         payload: String::from_utf8_lossy(&frame.payload).to_string(),
         payload_bytes: frame.payload.clone(),
         responder: Arc::new(Mutex::new(Some(tx))),
