@@ -94,12 +94,28 @@ lazy_static::lazy_static! {
     pub static ref WS_CONNECTIONS: Arc<Mutex<Vec<WsConnection>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref WS_FRAMES: Arc<Mutex<Vec<WsFrameEntry>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref PENDING_WS_FRAMES: Arc<Mutex<Vec<PendingWsFrame>>> = Arc::new(Mutex::new(Vec::new()));
+    pub static ref FORCED_CLOSED_WS_CONNS: Arc<Mutex<std::collections::HashSet<u32>>> = Arc::new(Mutex::new(std::collections::HashSet::new()));
     pub static ref UPSTREAM_AGENT: ureq::Agent = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout(std::time::Duration::from_secs(30))
         .max_idle_connections(200)
         .max_idle_connections_per_host(20)
         .build();
+}
+
+pub fn close_ws_connection(conn_id: u32) {
+    if let Ok(mut lock) = FORCED_CLOSED_WS_CONNS.lock() {
+        lock.insert(conn_id);
+    }
+    update_ws_conn_status(conn_id, "Closed (Manual)");
+}
+
+pub fn is_ws_conn_force_closed(conn_id: u32) -> bool {
+    if let Ok(lock) = FORCED_CLOSED_WS_CONNS.lock() {
+        lock.contains(&conn_id)
+    } else {
+        false
+    }
 }
 
 pub fn update_ws_conn_status(conn_id: u32, new_status: &str) {

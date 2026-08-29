@@ -166,6 +166,10 @@ pub fn handle_tls_websocket_tunnel(
             let h1 = thread::spawn(move || {
                 let mut reassembler = FrameReassembler::new();
                 loop {
+                    if crate::proxy::store::is_ws_conn_force_closed(conn_id) {
+                        break;
+                    }
+
                     let frame_res = {
                         if let Ok(mut c) = c_clone.lock() {
                             read_ws_frame(&mut *c)
@@ -177,11 +181,16 @@ pub fn handle_tls_websocket_tunnel(
                     let frame = match frame_res {
                         Ok(f) => f,
                         Err(ref e) if is_timeout_err(e) => {
+                            if crate::proxy::store::is_ws_conn_force_closed(conn_id) {
+                                break;
+                            }
                             thread::sleep(Duration::from_millis(5));
                             continue;
                         }
                         Err(_) => {
-                            update_ws_conn_status(conn_id, "Closed (EOF)");
+                            if !crate::proxy::store::is_ws_conn_force_closed(conn_id) {
+                                update_ws_conn_status(conn_id, "Closed (EOF)");
+                            }
                             break;
                         }
                     };
@@ -277,6 +286,10 @@ pub fn handle_tls_websocket_tunnel(
             // Server -> Client thread
             let mut reassembler = FrameReassembler::new();
             loop {
+                if crate::proxy::store::is_ws_conn_force_closed(conn_id) {
+                    break;
+                }
+
                 let frame_res = {
                     if let Ok(mut s) = server_arc.lock() {
                         read_ws_frame(&mut *s)
@@ -288,11 +301,16 @@ pub fn handle_tls_websocket_tunnel(
                 let frame = match frame_res {
                     Ok(f) => f,
                     Err(ref e) if is_timeout_err(e) => {
+                        if crate::proxy::store::is_ws_conn_force_closed(conn_id) {
+                            break;
+                        }
                         thread::sleep(Duration::from_millis(5));
                         continue;
                     }
                     Err(_) => {
-                        update_ws_conn_status(conn_id, "Closed (EOF)");
+                        if !crate::proxy::store::is_ws_conn_force_closed(conn_id) {
+                            update_ws_conn_status(conn_id, "Closed (EOF)");
+                        }
                         break;
                     }
                 };

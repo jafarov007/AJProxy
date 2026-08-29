@@ -72,6 +72,17 @@ pub fn render(
                                         ui.label(RichText::new(&conn.path).size(10.0).color(TEXT_2).family(FontFamily::Monospace));
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             ui.label(RichText::new(format!("{} msgs", conn.message_count)).size(9.0).color(ACCENT_CYAN));
+
+                                            if conn.status.starts_with("Active") {
+                                                if ui.add(
+                                                    egui::Button::new(RichText::new("🔌 Close").size(9.0).color(ACCENT_RED).strong())
+                                                        .fill(Color32::from_rgb(50, 15, 20))
+                                                        .rounding(Rounding::same(3.0))
+                                                ).on_hover_text("Disconnect active WebSocket tunnel").clicked() {
+                                                    crate::proxy::store::close_ws_connection(conn.id);
+                                                }
+                                                ui.add_space(4.0);
+                                            }
                                         });
                                     });
                                 });
