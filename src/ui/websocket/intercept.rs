@@ -24,6 +24,55 @@ pub fn render(ui: &mut egui::Ui, state: &mut WsInterceptState) {
         ).clicked() {
             state.enabled = !state.enabled;
             set_intercept_enabled(state.enabled);
+
+            // If turned OFF, flush any pending frames in queue so proxy threads unblock
+            if !state.enabled {
+                if let Some(pending) = state.active_pending.take() {
+                    let default_frame = WsRawFrame {
+                        fin: true,
+                        opcode_u8: match pending.opcode {
+                            WsOpcode::Text => 0x1,
+                            WsOpcode::Binary => 0x2,
+                            WsOpcode::Close => 0x8,
+                            WsOpcode::Ping => 0x9,
+                            WsOpcode::Pong => 0xA,
+                            _ => 0x1,
+                        },
+                        masked: false,
+                        mask_key: None,
+                        payload: pending.payload_bytes,
+                    };
+                    if let Ok(mut lock) = pending.responder.lock() {
+                        if let Some(sender) = lock.take() {
+                            let _ = sender.send(Some(default_frame));
+                        }
+                    }
+                }
+
+                if let Ok(mut lock) = PENDING_WS_FRAMES.lock() {
+                    for pending in lock.drain(..) {
+                        let default_frame = WsRawFrame {
+                            fin: true,
+                            opcode_u8: match pending.opcode {
+                                WsOpcode::Text => 0x1,
+                                WsOpcode::Binary => 0x2,
+                                WsOpcode::Close => 0x8,
+                                WsOpcode::Ping => 0x9,
+                                WsOpcode::Pong => 0xA,
+                                _ => 0x1,
+                            },
+                            masked: false,
+                            mask_key: None,
+                            payload: pending.payload_bytes,
+                        };
+                        if let Ok(mut r_lock) = pending.responder.lock() {
+                            if let Some(sender) = r_lock.take() {
+                                let _ = sender.send(Some(default_frame));
+                            }
+                        }
+                    }
+                }
+            }
         }
     });
 
@@ -31,24 +80,14 @@ pub fn render(ui: &mut egui::Ui, state: &mut WsInterceptState) {
     ui.separator();
     ui.add_space(8.0);
 
-    // Sync pending frames from proxy store if no frame active
-    if state.current_frame.is_none() && state.enabled {
+    // Sync next pending frame from proxy store if no active frame currently loaded
+    if state.active_pending.is_none() && state.enabled {
         if let Ok(mut lock) = PENDING_WS_FRAMES.lock() {
             if !lock.is_empty() {
                 let pending = lock.remove(0);
                 state.edited_payload = pending.payload.clone();
                 state.edited_opcode = pending.opcode.clone();
-                state.current_frame = Some(WsFrameEntry {
-                    id: pending.id,
-                    connection_id: pending.connection_id,
-                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-                    direction: pending.direction,
-                    opcode: pending.opcode.clone(),
-                    length: pending.payload.len(),
-                    payload: pending.payload,
-                    payload_bytes: pending.payload_bytes,
-                    is_final: true,
-                });
+                state.active_pending = Some(pending);
             }
         }
     }
@@ -69,12 +108,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut WsInterceptState) {
     let mut action_forward = false;
     let mut action_drop = false;
 
-    if let Some(ref frame) = state.current_frame {
-        let (dir_text, dir_color) = match frame.direction {
+    if let Some(ref pending) = state.active_pending {
+        let (dir_text, dir_color) = match pending.direction {
             WsDirection::ClientToServer => ("⬆️ Outbound Client Frame Paused", ACCENT_GREEN),
             WsDirection::ServerToClient => ("⬇️ Inbound Server Frame Paused", ACCENT_BLUE),
         };
-        let connection_id = frame.connection_id;
+        let connection_id = pending.connection_id;
 
         section_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -148,20 +187,14 @@ pub fn render(ui: &mut egui::Ui, state: &mut WsInterceptState) {
     }
 
     if action_forward || action_drop {
-        if let Some(frame) = state.current_frame.take() {
-            let mut maybe_sender = None;
-            if let Ok(mut lock) = PENDING_WS_FRAMES.lock() {
-                if let Some(pos) = lock.iter().position(|p| p.id == frame.id) {
-                    let pending = lock.remove(pos);
-                    let resp = pending.responder.clone();
-                    maybe_sender = match resp.lock() {
-                        Ok(mut guard) => guard.take(),
-                        Err(_) => None,
-                    };
-                }
+        if let Some(pending) = state.active_pending.take() {
+            let responder_mutex = pending.responder.clone();
+            let mut sender_opt = None;
+            if let Ok(mut lock) = responder_mutex.lock() {
+                sender_opt = lock.take();
             }
 
-            if let Some(sender) = maybe_sender {
+            if let Some(sender) = sender_opt {
                 if action_forward {
                     let opcode_u8 = match state.edited_opcode {
                         WsOpcode::Text => 0x1,
@@ -171,15 +204,29 @@ pub fn render(ui: &mut egui::Ui, state: &mut WsInterceptState) {
                         WsOpcode::Pong => 0xA,
                         _ => 0x1,
                     };
+                    let payload_bytes = match state.edited_opcode {
+                        WsOpcode::Binary => {
+                            let clean_hex: String = state.edited_payload.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+                            if clean_hex.len() % 2 == 0 && !clean_hex.is_empty() {
+                                (0..clean_hex.len())
+                                    .step_by(2)
+                                    .map(|i| u8::from_str_radix(&clean_hex[i..i + 2], 16).unwrap_or(0))
+                                    .collect()
+                            } else {
+                                state.edited_payload.as_bytes().to_vec()
+                            }
+                        }
+                        _ => state.edited_payload.as_bytes().to_vec(),
+                    };
                     let modified_frame = WsRawFrame {
                         fin: true,
                         opcode_u8,
                         masked: false,
                         mask_key: None,
-                        payload: state.edited_payload.as_bytes().to_vec(),
+                        payload: payload_bytes,
                     };
                     let _ = sender.send(Some(modified_frame));
-                } else {
+                } else if action_drop {
                     let _ = sender.send(None);
                 }
             }

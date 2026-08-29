@@ -480,10 +480,10 @@ pub struct WsHistoryState {
     pub export_status_msg: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct WsInterceptState {
     pub enabled: bool,
-    pub current_frame: Option<WsFrameEntry>,
+    pub active_pending: Option<crate::proxy::store::PendingWsFrame>,
     pub edited_payload: String,
     pub edited_opcode: WsOpcode,
 }

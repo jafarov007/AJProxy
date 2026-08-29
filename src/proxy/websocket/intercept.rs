@@ -13,6 +13,11 @@ pub fn check_and_intercept_frame(
         return Some(frame);
     }
 
+    // Do not block heartbeat or closure control frames (Close 0x8, Ping 0x9, Pong 0xA)
+    if frame.opcode_u8 == 0x8 || frame.opcode_u8 == 0x9 || frame.opcode_u8 == 0xA {
+        return Some(frame);
+    }
+
     let (tx, rx) = channel::<Option<WsRawFrame>>();
 
     let pending = PendingWsFrame {
@@ -31,7 +36,7 @@ pub fn check_and_intercept_frame(
         return Some(frame);
     }
 
-    // Block current tunnel thread until UI resolves the decision
+    // Block current tunnel thread until UI resolves Forward or Drop
     match rx.recv() {
         Ok(resolved_frame) => resolved_frame,
         Err(_) => Some(frame),
