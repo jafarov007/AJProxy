@@ -1,24 +1,5 @@
 #![allow(dead_code)]
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HttpEntry {
-    pub id: u32,
-    pub timestamp: String,
-    pub method: String,
-    pub host: String,
-    pub path: String,
-    pub url: String,
-    pub status_code: u16,
-    pub content_type: String,
-    pub length: usize,
-    pub duration_ms: u64,
-    pub protocol: String,
-    pub request_headers: String,
-    pub request_body: String,
-    pub response_headers: String,
-    pub response_body: String,
-}
+use super::http::{HeaderInjectionRule, InterceptRule};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab {
@@ -34,14 +15,6 @@ pub enum Tab {
     SiteMap,
     Modules,
     Settings,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct HeaderInjectionRule {
-    pub enabled: bool,
-    pub scope: String,
-    pub header_name: String,
-    pub header_value: String,
 }
 
 #[derive(Clone, Debug)]
@@ -123,31 +96,6 @@ pub struct BruteResult {
 }
 
 #[derive(Clone, Debug)]
-pub struct InterceptState {
-    pub enabled: bool,
-    pub current_entry: Option<HttpEntry>,
-    pub current_request: String,
-    pub queue_count: usize,
-    pub match_rules: Vec<InterceptRule>,
-    pub show_rules_modal: bool,
-    pub selected_paused_id: Option<u32>,
-}
-
-impl Default for InterceptState {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            current_entry: None,
-            current_request: String::new(),
-            queue_count: 0,
-            match_rules: vec![],
-            show_rules_modal: false,
-            selected_paused_id: None,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct RepeaterTab {
     pub name: String,
     pub target_host: String,
@@ -204,14 +152,6 @@ pub struct SiteMapNode {
     pub request_count: usize,
     pub in_scope: bool,
     pub expanded: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct InterceptRule {
-    pub enabled: bool,
-    pub match_type: String,
-    pub pattern: String,
-    pub action: String,
 }
 
 #[derive(Clone, Debug)]
@@ -324,11 +264,9 @@ impl AppSettings {
         let path_lower = path.to_lowercase();
         let ct_lower = content_type.to_lowercase();
 
-        // Helper to strip query string and hash fragment for exact file extension matching
         let clean_path = path_lower.split('?').next().unwrap_or(&path_lower);
         let clean_path = clean_path.split('#').next().unwrap_or(clean_path);
 
-        // 1. Checkbox 1: Filter CSS, JS, and Fonts (.js, .mjs, .cjs, .css, .woff, .woff2, .ttf | text/css, font/*, javascript)
         if self.filter_scripts_styles_fonts {
             if clean_path.ends_with(".js")
                 || clean_path.ends_with(".mjs")
@@ -352,7 +290,6 @@ impl AppSettings {
             }
         }
 
-        // 2. Checkbox 2: Filter Images & Media Icons (.png, .jpg, .jpeg, .gif, .svg, .ico | image/*)
         if self.filter_images_media {
             if clean_path.ends_with(".png")
                 || clean_path.ends_with(".jpg")
@@ -373,7 +310,6 @@ impl AppSettings {
             }
         }
 
-        // 3. Checkbox 3: Filter Cloudflare Challenges, Google & Yandex Noisy Domains
         if self.filter_noisy_domains {
             if url_lower.contains("challenges.cloudflare.com")
                 || url_lower.contains("google.")
@@ -396,119 +332,3 @@ impl AppSettings {
         false
     }
 }
-
-// ── WebSocket Data Models & State Structures ────────────────────────
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum WsSubTab {
-    #[default]
-    History,
-    Intercept,
-    Repeater,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WsOpcode {
-    Text,
-    Binary,
-    Ping,
-    Pong,
-    Close,
-    Continuation,
-    Unknown(u8),
-}
-
-impl Default for WsOpcode {
-    fn default() -> Self {
-        WsOpcode::Text
-    }
-}
-
-impl WsOpcode {
-    pub fn label(&self) -> &'static str {
-        match self {
-            WsOpcode::Text => "TEXT",
-            WsOpcode::Binary => "BINARY",
-            WsOpcode::Ping => "PING",
-            WsOpcode::Pong => "PONG",
-            WsOpcode::Close => "CLOSE",
-            WsOpcode::Continuation => "CONT",
-            WsOpcode::Unknown(_) => "UNKNOWN",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WsDirection {
-    ClientToServer, // ⬆️
-    ServerToClient, // ⬇️
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WsFrameEntry {
-    pub id: u64,
-    pub connection_id: u32,
-    pub timestamp: String,
-    pub direction: WsDirection,
-    pub opcode: WsOpcode,
-    pub length: usize,
-    pub payload: String,
-    pub payload_bytes: Vec<u8>,
-    pub is_final: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WsConnection {
-    pub id: u32,
-    pub url: String,
-    pub host: String,
-    pub path: String,
-    pub client_addr: String,
-    pub connected_at: String,
-    pub status: String, // "Active", "Closed"
-    pub message_count: usize,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct WsHistoryState {
-    pub selected_connection_id: Option<u32>,
-    pub search_query: String,
-    pub filter_opcode: Option<WsOpcode>,
-    pub selected_frame_id: Option<u64>,
-    pub inspector_mode: usize, // 0: Raw Text, 1: Hex, 2: JSON
-    pub show_export_modal: bool,
-    pub export_status_msg: String,
-}
-
-#[derive(Clone, Default)]
-pub struct WsInterceptState {
-    pub enabled: bool,
-    pub selected_frame_id: Option<u64>,
-    pub edited_payload: String,
-    pub edited_opcode: WsOpcode,
-}
-
-#[derive(Clone, Debug)]
-pub struct WsRepeaterTab {
-    pub name: String,
-    pub target_url: String,
-    pub is_connected: bool,
-    pub send_opcode: WsOpcode,
-    pub payload_input: String,
-    pub log_messages: Vec<WsFrameEntry>,
-}
-
-impl Default for WsRepeaterTab {
-    fn default() -> Self {
-        Self {
-            name: "WS Tab 1".into(),
-            target_url: "wss://echo.websocket.events".into(),
-            is_connected: false,
-            send_opcode: WsOpcode::Text,
-            payload_input: "{\"event\":\"ping\",\"data\":\"hello_ajproxy\"}".into(),
-            log_messages: vec![],
-        }
-    }
-}
-
-
