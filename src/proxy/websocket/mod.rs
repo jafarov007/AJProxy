@@ -3,5 +3,7 @@ pub mod intercept;
 pub mod protocol;
 pub mod reassembly;
 pub mod repeater_client;
+pub mod tunnel;
 
 pub use handshake::*;
+pub use tunnel::*;
