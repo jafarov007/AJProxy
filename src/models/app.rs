@@ -141,21 +141,42 @@ pub enum EncodingType { #[default] Base64, URL, HTML, Hex, JWT, MD5, SHA1, SHA25
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum TransformDirection { #[default] Decode, Encode }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ComparerState {
-    pub item_a: String,
-    pub item_b: String,
     pub left_text: String,
     pub right_text: String,
     pub left_label: String,
     pub right_label: String,
     pub diff_mode: DiffMode,
-    pub word_level: bool,
     pub sync_scroll: bool,
+    pub ignore_case: bool,
+    pub ignore_whitespace: bool,
+    pub show_diff_only: bool,
+}
+
+impl Default for ComparerState {
+    fn default() -> Self {
+        Self {
+            left_text: String::new(),
+            right_text: String::new(),
+            left_label: "Item A".to_string(),
+            right_label: "Item B".to_string(),
+            diff_mode: DiffMode::Words,
+            sync_scroll: true,
+            ignore_case: false,
+            ignore_whitespace: false,
+            show_diff_only: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum DiffMode { #[default] Words, Bytes }
+pub enum DiffMode {
+    #[default]
+    Words,
+    Lines,
+    Bytes,
+}
 
 #[derive(Clone, Debug)]
 pub struct SiteMapNode {

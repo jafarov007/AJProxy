@@ -29,6 +29,7 @@ base64 = "0.22"
 hex = "0.4"
 urlencoding = "2.1"
 html-escape = "0.2"
+similar = "2.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
