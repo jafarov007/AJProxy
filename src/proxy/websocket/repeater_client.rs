@@ -14,6 +14,7 @@ pub struct WsRepeaterClientHandle {
 pub fn spawn_repeater_client(
     target_url: String,
     on_frame_received: impl Fn(WsFrameEntry) + Send + 'static,
+    on_disconnect: impl Fn() + Send + 'static,
 ) -> Result<WsRepeaterClientHandle, String> {
     let is_tls = target_url.starts_with("wss://");
     let clean_url = target_url
@@ -53,6 +54,7 @@ pub fn spawn_repeater_client(
     );
 
     let (tx, rx) = channel::<WsRawFrame>();
+    let on_disconnect: Arc<Mutex<Option<Box<dyn Fn() + Send>>>> = Arc::new(Mutex::new(Some(Box::new(on_disconnect))));
 
     if is_tls {
         let mut connector_builder = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls())
@@ -79,6 +81,7 @@ pub fn spawn_repeater_client(
         let read_arc = Arc::clone(&stream_arc);
 
         // Receiver thread
+        let dc_clone = Arc::clone(&on_disconnect);
         thread::spawn(move || {
             loop {
                 let frame_res = {
@@ -106,6 +109,12 @@ pub fn spawn_repeater_client(
                         on_frame_received(entry);
                     }
                     Err(_) => break,
+                }
+            }
+            // Signal disconnection to UI
+            if let Ok(mut lock) = dc_clone.lock() {
+                if let Some(cb) = lock.take() {
+                    cb();
                 }
             }
         });
@@ -140,6 +149,7 @@ pub fn spawn_repeater_client(
         let mut stream_clone = stream.try_clone().map_err(|e| e.to_string())?;
 
         // Receiver thread
+        let dc_clone = Arc::clone(&on_disconnect);
         thread::spawn(move || {
             loop {
                 match read_ws_frame(&mut stream_clone) {
@@ -159,6 +169,12 @@ pub fn spawn_repeater_client(
                         on_frame_received(entry);
                     }
                     Err(_) => break,
+                }
+            }
+            // Signal disconnection to UI
+            if let Ok(mut lock) = dc_clone.lock() {
+                if let Some(cb) = lock.take() {
+                    cb();
                 }
             }
         });

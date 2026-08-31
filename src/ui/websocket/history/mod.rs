@@ -18,8 +18,8 @@ pub fn render(
     render_export_modal(ui.ctx(), state, connections, frames);
 
     egui::SidePanel::left("ws_history_connections_panel")
-        .default_width(260.0)
-        .width_range(200.0..=360.0)
+        .default_width(220.0)
+        .width_range(170.0..=280.0)
         .show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("WS Connections").size(12.0).color(TEXT_0).strong());
@@ -52,40 +52,46 @@ pub fn render(
                                 .rounding(Rounding::same(4.0))
                                 .inner_margin(egui::Margin::same(6.0))
                                 .show(ui, |ui| {
+                                    // Row 1: Status dot and Host title
                                     ui.horizontal(|ui| {
                                         let status_color = if conn.status.starts_with("Active") { ACCENT_GREEN } else { TEXT_2 };
                                         ui.label(RichText::new("●").size(10.0).color(status_color));
 
-                                        if ui.add(
+                                        let conn_title = format!("WS #{} - {}", conn.id, conn.host);
+                                        let btn = ui.add(
                                             egui::SelectableLabel::new(
                                                 is_selected,
-                                                RichText::new(format!("WS #{} - {}", conn.id, conn.host))
+                                                RichText::new(&conn_title)
                                                     .size(11.0)
                                                     .color(TEXT_0)
                                                     .strong()
                                             )
-                                        ).clicked() {
+                                        );
+                                        if btn.clicked() {
                                             state.selected_connection_id = Some(conn.id);
                                         }
                                     });
 
+                                    // Row 2: Message count and Path
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new(&conn.path).size(10.0).color(TEXT_2).family(FontFamily::Monospace));
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            ui.label(RichText::new(format!("{} msgs", conn.message_count)).size(9.0).color(ACCENT_CYAN));
-
-                                            if conn.status.starts_with("Active") {
-                                                if ui.add(
-                                                    egui::Button::new(RichText::new("🔌 Close").size(9.0).color(ACCENT_RED).strong())
-                                                        .fill(Color32::from_rgb(50, 15, 20))
-                                                        .rounding(Rounding::same(3.0))
-                                                ).on_hover_text("Disconnect active WebSocket tunnel").clicked() {
-                                                    crate::proxy::store::close_ws_connection(conn.id);
-                                                }
-                                                ui.add_space(4.0);
-                                            }
-                                        });
+                                        ui.label(RichText::new(format!("{} msgs", conn.message_count)).size(9.0).color(ACCENT_CYAN));
+                                        ui.add_space(4.0);
+                                        ui.add(egui::Label::new(RichText::new(&conn.path).size(10.0).color(TEXT_2).family(FontFamily::Monospace)).truncate(true));
                                     });
+
+                                    // Row 3: Close Tunnel Button (Dedicated row if active)
+                                    if conn.status.starts_with("Active") {
+                                        ui.add_space(2.0);
+                                        if ui.add(
+                                            egui::Button::new(RichText::new("🔌 Close Active Tunnel").size(9.5).color(ACCENT_RED).strong())
+                                                .fill(Color32::from_rgb(50, 15, 20))
+                                                .stroke(egui::Stroke::new(0.5_f32, ACCENT_RED))
+                                                .min_size(egui::vec2(ui.available_width(), 18.0))
+                                                .rounding(Rounding::same(3.0))
+                                        ).on_hover_text("Disconnect active WebSocket tunnel").clicked() {
+                                            crate::proxy::store::close_ws_connection(conn.id);
+                                        }
+                                    }
                                 });
                             ui.add_space(2.0);
                         }
@@ -175,7 +181,14 @@ pub fn render(
                 }
                 if !state.search_query.is_empty() {
                     let q = state.search_query.to_lowercase();
-                    if !f.payload.to_lowercase().contains(&q) {
+                    // Deep search: payload + connection URL/host
+                    let matches_payload = f.payload.to_lowercase().contains(&q);
+                    let matches_conn = connections
+                        .iter()
+                        .find(|c| c.id == f.connection_id)
+                        .map(|c| c.url.to_lowercase().contains(&q) || c.host.to_lowercase().contains(&q))
+                        .unwrap_or(false);
+                    if !matches_payload && !matches_conn {
                         return false;
                     }
                 }
@@ -250,7 +263,7 @@ pub fn render(
                                         };
 
                                         ui.horizontal(|ui| {
-                                            ui.label(RichText::new(&payload_short).size(10.0).color(TEXT_0).family(FontFamily::Monospace));
+                                            ui.add(egui::Label::new(RichText::new(&payload_short).size(10.0).color(TEXT_0).family(FontFamily::Monospace)).truncate(true));
 
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 if ui.add(
@@ -308,7 +321,7 @@ pub fn render(
                 let selected_frame = frames.iter().find(|f| Some(f.id) == state.selected_frame_id);
 
                 if let Some(frame) = selected_frame {
-                    ScrollArea::vertical()
+                    ScrollArea::both()
                         .id_source("ws_inspector_scroll")
                         .show(ui, |ui| {
                             let content = match state.inspector_mode {

@@ -43,7 +43,7 @@ pub fn render_full_cell(
     ui.allocate_ui_at_rect(rect, |ui| {
         ui.horizontal(|ui| {
             ui.add_space(4.0);
-            ui.label(rich_text);
+            ui.add(egui::Label::new(rich_text).truncate(true));
         });
     });
 

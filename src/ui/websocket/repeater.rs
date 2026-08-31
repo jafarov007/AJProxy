@@ -10,6 +10,7 @@ use crate::proxy::websocket::repeater_client::spawn_repeater_client;
 lazy_static::lazy_static! {
     static ref REPEATER_CLIENT_HANDLES: Arc<Mutex<HashMap<usize, Sender<WsRawFrame>>>> = Arc::new(Mutex::new(HashMap::new()));
     static ref REPEATER_INCOMING_QUEUE: Arc<Mutex<Vec<(usize, WsFrameEntry)>>> = Arc::new(Mutex::new(Vec::new()));
+    pub static ref REPEATER_DISCONNECT_QUEUE: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
 }
 
 fn drain_incoming_messages(repeater_tabs: &mut [WsRepeaterTab]) {
@@ -18,6 +19,32 @@ fn drain_incoming_messages(repeater_tabs: &mut [WsRepeaterTab]) {
             for (tab_idx, frame) in lock.drain(..) {
                 if tab_idx < repeater_tabs.len() {
                     repeater_tabs[tab_idx].log_messages.push(frame);
+                }
+            }
+        }
+    }
+
+    // Process disconnect notifications from background threads
+    if let Ok(mut lock) = REPEATER_DISCONNECT_QUEUE.lock() {
+        if !lock.is_empty() {
+            for tab_idx in lock.drain(..) {
+                if tab_idx < repeater_tabs.len() && repeater_tabs[tab_idx].is_connected {
+                    repeater_tabs[tab_idx].is_connected = false;
+                    if let Ok(mut handles) = REPEATER_CLIENT_HANDLES.lock() {
+                        handles.remove(&tab_idx);
+                    }
+                    let msg = "⚠️ Connection lost — remote server closed the connection.";
+                    repeater_tabs[tab_idx].log_messages.push(WsFrameEntry {
+                        id: crate::proxy::store::next_ws_frame_id(),
+                        connection_id: 0,
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        direction: WsDirection::ServerToClient,
+                        opcode: WsOpcode::Close,
+                        length: msg.len(),
+                        payload: msg.into(),
+                        payload_bytes: msg.as_bytes().to_vec(),
+                        is_final: true,
+                    });
                 }
             }
         }
@@ -204,6 +231,13 @@ pub fn render(
                         if let Ok(mut q) = REPEATER_INCOMING_QUEUE.lock() {
                             q.push((current_tab_idx, frame));
                         }
+                    }, {
+                        let dc_tab_idx = tab_idx;
+                        move || {
+                            if let Ok(mut q) = REPEATER_DISCONNECT_QUEUE.lock() {
+                                q.push(dc_tab_idx);
+                            }
+                        }
                     }) {
                         Ok(handle) => {
                             if let Ok(mut lock) = REPEATER_CLIENT_HANDLES.lock() {
@@ -282,6 +316,13 @@ pub fn render(
                             if let Ok(handle) = spawn_repeater_client(url_to_connect, move |frame| {
                                 if let Ok(mut q) = REPEATER_INCOMING_QUEUE.lock() {
                                     q.push((current_tab_idx, frame));
+                                }
+                            }, {
+                                let dc_tab_idx = tab_idx;
+                                move || {
+                                    if let Ok(mut q) = REPEATER_DISCONNECT_QUEUE.lock() {
+                                        q.push(dc_tab_idx);
+                                    }
                                 }
                             }) {
                                 if let Ok(mut lock) = REPEATER_CLIENT_HANDLES.lock() {
@@ -393,7 +434,7 @@ pub fn render(
             ui.separator();
             ui.add_space(4.0);
 
-            ScrollArea::vertical()
+            ScrollArea::both()
                 .id_source("ws_repeater_log_scroll")
                 .show(ui, |ui| {
                     if tab.log_messages.is_empty() {
@@ -411,7 +452,7 @@ pub fn render(
                                 ui.label(RichText::new(dir_str).size(10.0).color(dir_color).strong());
                                 ui.label(RichText::new(frame.opcode.label()).size(9.0).color(ACCENT_CYAN).family(FontFamily::Monospace));
                             });
-                            ui.label(RichText::new(&frame.payload).size(10.0).color(TEXT_0).family(FontFamily::Monospace));
+                            ui.add(egui::Label::new(RichText::new(&frame.payload).size(10.0).color(TEXT_0).family(FontFamily::Monospace)).wrap(true));
                             ui.separator();
                         }
                     }

@@ -320,15 +320,23 @@ pub fn run_plain_websocket_tunnel_loop(
     let h1 = thread::spawn(move || {
         let mut reassembler = FrameReassembler::new();
         loop {
+            if crate::proxy::store::is_ws_conn_force_closed(conn_id) {
+                break;
+            }
             let frame_res = read_ws_frame(&mut client_clone);
             let frame = match frame_res {
                 Ok(f) => f,
                 Err(ref e) if is_timeout_err(e) => {
+                    if crate::proxy::store::is_ws_conn_force_closed(conn_id) {
+                        break;
+                    }
                     thread::sleep(Duration::from_millis(5));
                     continue;
                 }
                 Err(_) => {
-                    update_ws_conn_status(conn_id, "Closed (EOF)");
+                    if !crate::proxy::store::is_ws_conn_force_closed(conn_id) {
+                        update_ws_conn_status(conn_id, "Closed (EOF)");
+                    }
                     break;
                 }
             };

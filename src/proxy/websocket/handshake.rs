@@ -9,6 +9,9 @@ use crate::proxy::store::{
 use super::tunnel::{run_plain_websocket_tunnel_loop, run_tls_websocket_tunnel_loop};
 
 pub fn is_websocket_upgrade(req_headers: &str) -> bool {
+    if !crate::proxy::store::is_ws_proxy_enabled() {
+        return false;
+    }
     req_headers.lines().any(|l| {
         if let Some((k, v)) = l.split_once(':') {
             let k = k.trim().to_lowercase();

@@ -8,6 +8,7 @@ static NEXT_WS_CONN_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_WS_FRAME_ID: AtomicU32 = AtomicU32::new(1);
 static INTERCEPT_ENABLED: AtomicBool = AtomicBool::new(false); // DEFAULT OFF!
 static WS_INTERCEPT_ENABLED: AtomicBool = AtomicBool::new(false); // DEFAULT OFF!
+static WS_PROXY_ENABLED: AtomicBool = AtomicBool::new(true); // DEFAULT ON!
 
 pub fn next_entry_id() -> u32 {
     NEXT_ID.fetch_add(1, Ordering::SeqCst)
@@ -35,6 +36,52 @@ pub fn set_ws_intercept_enabled(enabled: bool) {
 
 pub fn is_ws_intercept_enabled() -> bool {
     WS_INTERCEPT_ENABLED.load(Ordering::SeqCst)
+}
+
+pub fn set_ws_proxy_enabled(enabled: bool) {
+    WS_PROXY_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+pub fn is_ws_proxy_enabled() -> bool {
+    WS_PROXY_ENABLED.load(Ordering::SeqCst)
+}
+
+#[allow(dead_code)]
+pub fn update_ws_scope_hosts(hosts_csv: &str) {
+    let hosts: Vec<String> = hosts_csv
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if let Ok(mut lock) = WS_SCOPE_HOSTS.lock() {
+        *lock = hosts;
+    }
+}
+
+pub fn is_ws_host_in_scope(host: &str) -> bool {
+    if let Ok(lock) = WS_SCOPE_HOSTS.lock() {
+        if lock.is_empty() {
+            return true; // Empty scope means ALL hosts are in scope
+        }
+        let host_lower = host.to_lowercase();
+        lock.iter().any(|h| host_lower.contains(h) || h.contains(&host_lower))
+    } else {
+        true
+    }
+}
+
+pub fn is_ws_conn_in_scope(conn_id: u32) -> bool {
+    if let Ok(lock) = WS_SCOPE_HOSTS.lock() {
+        if lock.is_empty() {
+            return true;
+        }
+    }
+    if let Ok(conns) = WS_CONNECTIONS.lock() {
+        if let Some(conn) = conns.iter().find(|c| c.id == conn_id) {
+            return is_ws_host_in_scope(&conn.host);
+        }
+    }
+    true
 }
 
 pub enum InterceptDecision {
@@ -91,6 +138,7 @@ lazy_static::lazy_static! {
     pub static ref HEADER_INJECTION_RULES: Arc<Mutex<Vec<HeaderInjectionRule>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref NOISE_FILTER_SETTINGS: Arc<Mutex<NoiseFilterFlags>> = Arc::new(Mutex::new(NoiseFilterFlags::default()));
     pub static ref PASSTHROUGH_HOSTS: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    pub static ref WS_SCOPE_HOSTS: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref WS_CONNECTIONS: Arc<Mutex<Vec<WsConnection>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref WS_FRAMES: Arc<Mutex<Vec<WsFrameEntry>>> = Arc::new(Mutex::new(Vec::new()));
     pub static ref PENDING_WS_FRAMES: Arc<Mutex<Vec<PendingWsFrame>>> = Arc::new(Mutex::new(Vec::new()));

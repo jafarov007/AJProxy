@@ -205,3 +205,156 @@ pub fn render_host_filter_modal(ctx: &egui::Context, filter_state: &mut FilterSt
         });
     filter_state.show_host_filter_modal = is_open;
 }
+
+pub fn render_method_filter_modal(ctx: &egui::Context, filter_state: &mut FilterState) {
+    if !filter_state.show_method_filter_modal {
+        return;
+    }
+
+    let mut is_open = filter_state.show_method_filter_modal;
+    egui::Window::new(RichText::new("🔧 HTTP Method Filter").size(14.0).color(TEXT_0).strong())
+        .open(&mut is_open)
+        .collapsible(false)
+        .resizable(false)
+        .default_size([400.0, 260.0])
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.label(RichText::new("Select HTTP methods to show. Only matching requests will be displayed.").size(11.0).color(TEXT_2));
+            ui.add_space(8.0);
+
+            // Quick-select method buttons
+            ui.horizontal_wrapped(|ui| {
+                let methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD", "CONNECT"];
+                for method in &methods {
+                    let is_active = filter_state.method_filters.iter().any(|m| m.eq_ignore_ascii_case(method));
+                    let color = if is_active { ACCENT_GREEN } else { TEXT_2 };
+                    let bg = if is_active { eframe::egui::Color32::from_rgb(15, 50, 25) } else { eframe::egui::Color32::from_rgb(30, 32, 40) };
+
+                    if ui.add(
+                        egui::Button::new(RichText::new(*method).size(11.0).color(color).strong())
+                            .fill(bg)
+                            .rounding(egui::Rounding::same(4.0))
+                    ).clicked() {
+                        if is_active {
+                            filter_state.method_filters.retain(|m| !m.eq_ignore_ascii_case(method));
+                        } else {
+                            filter_state.method_filters.push(method.to_string());
+                        }
+                    }
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // Custom method input
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut filter_state.new_method_filter_input).hint_text("Custom method...").desired_width(180.0));
+                if ui.button(RichText::new("➕ Add").size(11.0).color(ACCENT_GREEN)).clicked() {
+                    let val = filter_state.new_method_filter_input.trim().to_uppercase();
+                    if !val.is_empty() && !filter_state.method_filters.iter().any(|m| m.eq_ignore_ascii_case(&val)) {
+                        filter_state.method_filters.push(val);
+                        filter_state.new_method_filter_input.clear();
+                    }
+                }
+            });
+
+            if !filter_state.method_filters.is_empty() {
+                ui.add_space(8.0);
+                ui.label(RichText::new(format!("Active: {}", filter_state.method_filters.join(", "))).size(11.0).color(ACCENT_CYAN).strong());
+            }
+
+            ui.add_space(12.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                if !filter_state.method_filters.is_empty() {
+                    if ui.button(RichText::new("🗑 Clear All").size(11.0).color(ACCENT_AMBER)).clicked() {
+                        filter_state.method_filters.clear();
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(RichText::new("Close").size(11.0).color(TEXT_0)).clicked() {
+                        filter_state.show_method_filter_modal = false;
+                    }
+                });
+            });
+        });
+    filter_state.show_method_filter_modal = is_open;
+}
+
+pub fn render_path_filter_modal(ctx: &egui::Context, filter_state: &mut FilterState) {
+    if !filter_state.show_path_filter_modal {
+        return;
+    }
+
+    let mut is_open = filter_state.show_path_filter_modal;
+    egui::Window::new(RichText::new("📂 URL Path Filter").size(14.0).color(TEXT_0).strong())
+        .open(&mut is_open)
+        .collapsible(false)
+        .resizable(false)
+        .default_size([420.0, 280.0])
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.label(RichText::new("Add path substrings to filter. Only requests whose path contains a match will be shown.").size(11.0).color(TEXT_2));
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut filter_state.new_path_filter_input).hint_text("e.g. /api/ or /login").desired_width(280.0));
+                if ui.button(RichText::new("➕ Add Path").size(11.0).color(ACCENT_GREEN)).clicked() {
+                    let val = filter_state.new_path_filter_input.trim().to_string();
+                    if !val.is_empty() && !filter_state.path_filters.contains(&val) {
+                        filter_state.path_filters.push(val);
+                        filter_state.new_path_filter_input.clear();
+                    }
+                }
+            });
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.label(RichText::new(format!("Active Path Filters ({})", filter_state.path_filters.len())).size(12.0).color(ACCENT_CYAN).strong());
+            ui.add_space(4.0);
+
+            egui::ScrollArea::vertical()
+                .id_source("path_filters_scroll")
+                .max_height(120.0)
+                .show(ui, |ui| {
+                    if filter_state.path_filters.is_empty() {
+                        ui.label(RichText::new("No path filters active. All paths are visible.").size(11.0).color(TEXT_2));
+                    } else {
+                        let mut to_remove = None;
+                        for (idx, filter) in filter_state.path_filters.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(format!("• *{}*", filter)).size(12.0).color(ACCENT_GREEN).strong());
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button(RichText::new("✖").size(10.0).color(ACCENT_RED)).clicked() {
+                                        to_remove = Some(idx);
+                                    }
+                                });
+                            });
+                        }
+                        if let Some(idx) = to_remove {
+                            filter_state.path_filters.remove(idx);
+                        }
+                    }
+                });
+
+            ui.add_space(12.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                if !filter_state.path_filters.is_empty() {
+                    if ui.button(RichText::new("🗑 Clear All").size(11.0).color(ACCENT_AMBER)).clicked() {
+                        filter_state.path_filters.clear();
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(RichText::new("Close").size(11.0).color(TEXT_0)).clicked() {
+                        filter_state.show_path_filter_modal = false;
+                    }
+                });
+            });
+        });
+    filter_state.show_path_filter_modal = is_open;
+}

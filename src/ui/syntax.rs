@@ -5,6 +5,7 @@ pub fn http_layouter(ui: &egui::Ui, text: &str, wrap_width: f32) -> std::sync::A
     let font_id = FontId::new(12.0, FontFamily::Monospace);
     let mut job = LayoutJob::default();
     job.wrap.max_width = wrap_width;
+    job.wrap.break_anywhere = true;
 
     if text.is_empty() {
         return ui.fonts(|f| f.layout_job(job));

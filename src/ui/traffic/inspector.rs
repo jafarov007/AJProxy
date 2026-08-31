@@ -27,16 +27,21 @@ pub fn render_inspector_section(ui: &mut egui::Ui, entry: &HttpEntry, is_request
         };
 
         let mut display_str = raw_text.as_str();
-        let mut layouter = |ui: &egui::Ui, string: &str, wrap_width: f32| {
-            syntax::http_layouter(ui, string, wrap_width)
+        let avail_w = ui.available_width();
+        let mut layouter = move |ui: &egui::Ui, string: &str, _wrap_width: f32| {
+            syntax::http_layouter(ui, string, avail_w)
         };
 
-        ui.add(
-            egui::TextEdit::multiline(&mut display_str)
-                .font(TextStyle::Monospace)
-                .layouter(&mut layouter)
-                .desired_width(f32::INFINITY)
-                .desired_rows(18)
-        );
+        egui::ScrollArea::vertical()
+            .id_source(if is_request { "http_req_inspector_scroll" } else { "http_resp_inspector_scroll" })
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut display_str)
+                        .font(TextStyle::Monospace)
+                        .layouter(&mut layouter)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(18)
+                );
+            });
     });
 }

@@ -9,7 +9,7 @@ pub fn check_and_intercept_frame(
     frame: WsRawFrame,
     direction: WsDirection,
 ) -> Option<WsRawFrame> {
-    if !is_ws_intercept_enabled() {
+    if !is_ws_intercept_enabled() || !crate::proxy::store::is_ws_conn_in_scope(conn_id) {
         return Some(frame);
     }
 

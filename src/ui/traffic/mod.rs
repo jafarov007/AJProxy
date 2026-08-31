@@ -5,7 +5,7 @@ pub mod table;
 use eframe::egui::{self, Color32, RichText, Stroke};
 use crate::models::{HttpEntry, FilterState, HeaderInjectionRule, TrafficAction};
 pub use inspector::render_inspector_section;
-pub use modals::{render_export_modal, render_host_filter_modal};
+pub use modals::{render_export_modal, render_host_filter_modal, render_method_filter_modal, render_path_filter_modal};
 pub use table::render_traffic_table;
 
 const BG_DARK: Color32 = Color32::from_rgb(18, 18, 20);
@@ -52,14 +52,38 @@ pub fn render(
                 }
             }
 
-            // 3. Search query filter
+            // 3. Method Filters
+            if !filter_state.method_filters.is_empty() {
+                let method_upper = e.method.to_uppercase();
+                let matches_method = filter_state.method_filters.iter().any(|m| {
+                    method_upper == m.to_uppercase()
+                });
+                if !matches_method {
+                    return false;
+                }
+            }
+
+            // 4. Path Filters (substring match)
+            if !filter_state.path_filters.is_empty() {
+                let path_lower = e.path.to_lowercase();
+                let matches_path = filter_state.path_filters.iter().any(|p| {
+                    path_lower.contains(&p.to_lowercase())
+                });
+                if !matches_path {
+                    return false;
+                }
+            }
+
+            // 5. Search query filter (deep search: headers + body + URL)
             if !filter_state.search_query.is_empty() {
                 let q = filter_state.search_query.to_lowercase();
                 let matches_q = e.host.to_lowercase().contains(&q)
                     || e.url.to_lowercase().contains(&q)
                     || e.method.to_lowercase().contains(&q)
                     || e.request_headers.to_lowercase().contains(&q)
-                    || e.response_headers.to_lowercase().contains(&q);
+                    || e.response_headers.to_lowercase().contains(&q)
+                    || e.request_body.to_lowercase().contains(&q)
+                    || e.response_body.to_lowercase().contains(&q);
                 if !matches_q {
                     return false;
                 }
@@ -105,21 +129,44 @@ pub fn render(
         // ── Action Bar / Filter Controls (Directly under Send to Repeater) ────
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Right-most: Add Host Filter Button (Directly under Send to Repeater)
-                let filter_btn_label = if filter_state.host_filters.is_empty() {
-                    "➕ Add Host Filter".to_string()
+                // Host Filter Button
+                let host_btn_label = if filter_state.host_filters.is_empty() {
+                    "➕ Host Filter".to_string()
                 } else {
-                    format!("🎯 Host Filters ({} Active)", filter_state.host_filters.len())
+                    format!("🎯 Host ({})", filter_state.host_filters.len())
                 };
-
-                if ui.button(RichText::new(filter_btn_label).size(11.0).color(if filter_state.host_filters.is_empty() { ACCENT_BLUE } else { ACCENT_AMBER })).clicked() {
+                if ui.button(RichText::new(host_btn_label).size(10.0).color(if filter_state.host_filters.is_empty() { ACCENT_BLUE } else { ACCENT_AMBER })).clicked() {
                     filter_state.show_host_filter_modal = true;
                 }
 
-                ui.add_space(12.0);
+                ui.add_space(6.0);
+
+                // Method Filter Button
+                let method_btn_label = if filter_state.method_filters.is_empty() {
+                    "🔧 Method Filter".to_string()
+                } else {
+                    format!("🔧 Methods ({})", filter_state.method_filters.join(","))
+                };
+                if ui.button(RichText::new(method_btn_label).size(10.0).color(if filter_state.method_filters.is_empty() { ACCENT_BLUE } else { ACCENT_AMBER })).clicked() {
+                    filter_state.show_method_filter_modal = true;
+                }
+
+                ui.add_space(6.0);
+
+                // Path Filter Button
+                let path_btn_label = if filter_state.path_filters.is_empty() {
+                    "📂 Path Filter".to_string()
+                } else {
+                    format!("📂 Paths ({})", filter_state.path_filters.len())
+                };
+                if ui.button(RichText::new(path_btn_label).size(10.0).color(if filter_state.path_filters.is_empty() { ACCENT_BLUE } else { ACCENT_AMBER })).clicked() {
+                    filter_state.show_path_filter_modal = true;
+                }
+
+                ui.add_space(6.0);
 
                 // Checkbox (Hide 0-byte responses)
-                ui.checkbox(&mut filter_state.hide_zero_size, RichText::new("🚫 Hide 0-byte responses (Size = 0)").size(11.0).color(TEXT_1));
+                ui.checkbox(&mut filter_state.hide_zero_size, RichText::new("🚫 Hide 0B").size(10.0).color(TEXT_1));
             });
         });
         ui.add_space(4.0);
@@ -148,7 +195,11 @@ pub fn render(
                             ui.selectable_value(active_tab, 1, RichText::new("RESPONSE").size(11.0).strong());
                             ui.selectable_value(active_tab, 2, RichText::new("SPLIT VIEW").size(11.0).strong());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(RichText::new(format!("URL: {}", entry.url)).size(10.0).color(ACCENT_CYAN));
+                                let trunc_url = crate::ui::traffic::table::truncate_str(&format!("URL: {}", entry.url), 90);
+                                ui.add(
+                                    egui::Label::new(RichText::new(trunc_url).size(10.0).color(ACCENT_CYAN))
+                                        .truncate(true)
+                                ).on_hover_text(&entry.url);
                             });
                         });
                         ui.separator();
@@ -177,6 +228,8 @@ pub fn render(
     // ── Render Modals ─────────────────────────────────────────────────────────
     render_export_modal(ctx, filter_state, entries);
     render_host_filter_modal(ctx, filter_state);
+    render_method_filter_modal(ctx, filter_state);
+    render_path_filter_modal(ctx, filter_state);
 
     action
 }

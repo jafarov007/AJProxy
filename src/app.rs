@@ -135,7 +135,9 @@ impl AJProxyApp {
         }
 
         let live_ws_conns = crate::proxy::store::get_ws_connections();
-        if live_ws_conns.len() != self.ws_connections.len() {
+        if live_ws_conns.len() != self.ws_connections.len()
+            || live_ws_conns.iter().zip(self.ws_connections.iter()).any(|(a, b)| a.status != b.status || a.message_count != b.message_count)
+        {
             self.ws_connections = live_ws_conns;
             ctx.request_repaint();
         }

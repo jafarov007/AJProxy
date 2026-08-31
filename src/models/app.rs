@@ -34,6 +34,12 @@ pub struct FilterState {
     pub show_host_filter_modal: bool,
     pub host_filters: Vec<String>,
     pub new_host_filter_input: String,
+    pub show_method_filter_modal: bool,
+    pub method_filters: Vec<String>,
+    pub new_method_filter_input: String,
+    pub show_path_filter_modal: bool,
+    pub path_filters: Vec<String>,
+    pub new_path_filter_input: String,
 }
 
 impl Default for FilterState {
@@ -54,6 +60,12 @@ impl Default for FilterState {
             show_host_filter_modal: false,
             host_filters: Vec::new(),
             new_host_filter_input: String::new(),
+            show_method_filter_modal: false,
+            method_filters: Vec::new(),
+            new_method_filter_input: String::new(),
+            show_path_filter_modal: false,
+            path_filters: Vec::new(),
+            new_path_filter_input: String::new(),
         }
     }
 }
