@@ -264,13 +264,6 @@ impl Default for AppSettings {
                     protocol: "Auto".into(),
                     tls_mitm: true,
                 },
-                ProxyListenerConfig {
-                    enabled: false,
-                    bind_address: "0.0.0.0".into(),
-                    bind_port: 8088,
-                    protocol: "HTTP/1.1".into(),
-                    tls_mitm: true,
-                },
             ],
             cert_status_msg: String::new(),
             filter_scripts_styles_fonts: true,

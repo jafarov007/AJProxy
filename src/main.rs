@@ -30,8 +30,8 @@ fn main() -> eframe::Result<()> {
         proxy::cert::install_root_ca_to_nss_db();
     }
 
-    // Start background TCP HTTP/HTTPS Proxy Listener on 127.0.0.1:8080
-    proxy::listener::start_proxy_server("127.0.0.1".to_string(), 8080);
+    // Root CA installation handled on startup
+    // Proxy Listeners are dynamically managed by AJProxyApp listener manager
 
     let options = NativeOptions {
         viewport: egui::ViewportBuilder::default()

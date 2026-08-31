@@ -39,7 +39,7 @@ pub struct AJProxyApp {
 
 impl AJProxyApp {
     pub fn new() -> Self {
-        Self {
+        let app_instance = Self {
             splash_start: Instant::now(),
             active_tab: Tab::Dashboard,
             proxy_running: true,
@@ -102,7 +102,9 @@ impl AJProxyApp {
             active_ws_repeater_tab: 0,
             ws_connections: vec![],
             ws_frames: vec![],
-        }
+        };
+        crate::proxy::listener::sync_listeners(&app_instance.settings.listeners);
+        app_instance
     }
 
     pub fn sync_live_traffic(&mut self, ctx: &egui::Context) {

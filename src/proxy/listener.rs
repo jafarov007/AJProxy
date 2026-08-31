@@ -1,54 +1,146 @@
+use std::collections::HashMap;
 use std::io::Write;
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use crate::models::ProxyListenerConfig;
 use crate::proxy::cert;
 use crate::proxy::http_stream::read_full_http_request;
 use crate::proxy::mitm::handle_https_connect_mitm;
 use crate::proxy::forwarder::forward_http_request;
 pub use crate::proxy::store::*;
 
-static PROXY_RUNNING: AtomicBool = AtomicBool::new(false);
-
 lazy_static::lazy_static! {
     pub static ref UPSTREAM_AGENT: ureq::Agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(Duration::from_secs(60))
         .max_idle_connections(100)
         .max_idle_connections_per_host(10)
         .build();
+
+    static ref ACTIVE_LISTENERS: Mutex<HashMap<String, Arc<AtomicBool>>> = Mutex::new(HashMap::new());
+}
+
+pub fn is_listener_running(bind_address: &str, port: u16) -> bool {
+    let addr = format!("{}:{}", bind_address, port);
+    if let Ok(listeners) = ACTIVE_LISTENERS.lock() {
+        if let Some(flag) = listeners.get(&addr) {
+            return flag.load(Ordering::Relaxed);
+        }
+    }
+    false
 }
 
 #[allow(dead_code)]
-pub fn is_proxy_running() -> bool {
-    PROXY_RUNNING.load(Ordering::Relaxed)
-}
-
 pub fn start_proxy_server(host: String, port: u16) {
     let addr = format!("{}:{}", host, port);
-    let _ = start_proxy_listener(&addr);
+    let _ = start_single_listener(&addr);
 }
 
-/// Starts the proxy listener on 127.0.0.1:8080
-pub fn start_proxy_listener(addr: &str) -> std::io::Result<()> {
-    let listener = TcpListener::bind(addr)?;
-    PROXY_RUNNING.store(true, Ordering::Relaxed);
-    println!("[AJProxy Engine] Listening on http://{}", addr);
+pub fn sync_listeners(configs: &[ProxyListenerConfig]) {
+    let mut listeners = ACTIVE_LISTENERS.lock().unwrap();
+
+    // 1. Identify which addresses should be running, deduplicating ports (prefer 0.0.0.0 over 127.0.0.1 on same port)
+    let mut desired_map: HashMap<String, bool> = HashMap::new();
+    let mut used_ports: HashMap<u16, String> = HashMap::new();
+
+    // First pass: register 0.0.0.0 addresses
+    for cfg in configs {
+        if cfg.enabled && cfg.bind_address == "0.0.0.0" {
+            let addr = format!("{}:{}", cfg.bind_address, cfg.bind_port);
+            desired_map.insert(addr.clone(), true);
+            used_ports.insert(cfg.bind_port, addr);
+        }
+    }
+
+    // Second pass: register other addresses if port not already taken
+    for cfg in configs {
+        if cfg.enabled && cfg.bind_address != "0.0.0.0" {
+            let addr = format!("{}:{}", cfg.bind_address, cfg.bind_port);
+            if !used_ports.contains_key(&cfg.bind_port) {
+                desired_map.insert(addr.clone(), true);
+                used_ports.insert(cfg.bind_port, addr);
+            }
+        }
+    }
+
+    // 2. Stop listeners that are no longer desired and wake up thread to free socket immediately
+    let current_keys: Vec<String> = listeners.keys().cloned().collect();
+    for addr in current_keys {
+        if !desired_map.contains_key(&addr) {
+            if let Some(flag) = listeners.remove(&addr) {
+                flag.store(false, Ordering::Relaxed);
+                println!("[AJProxy Engine] Stopping proxy listener on {}", addr);
+
+                // Send a quick dummy loopback connection to unblock listener.incoming() so OS frees the port immediately
+                let target = if addr.starts_with("0.0.0.0") {
+                    format!("127.0.0.1{}", &addr[7..])
+                } else {
+                    addr.clone()
+                };
+
+                if let Ok(target_sa) = target.parse::<SocketAddr>() {
+                    let _ = TcpStream::connect_timeout(&target_sa, Duration::from_millis(50));
+                }
+            }
+        }
+    }
+
+    // Give OS a tiny 30ms window to release port
+    thread::sleep(Duration::from_millis(30));
+
+    // 3. Start newly desired listeners
+    for addr in desired_map.keys() {
+        if !listeners.contains_key(addr) {
+            let running_flag = Arc::new(AtomicBool::new(true));
+            match start_listener_thread(addr.clone(), running_flag.clone()) {
+                Ok(_) => {
+                    listeners.insert(addr.clone(), running_flag);
+                    println!("[AJProxy Engine] Dynamically started proxy listener on http://{}", addr);
+                }
+                Err(e) => {
+                    eprintln!("[AJProxy Engine] Failed to bind proxy listener on {}: {}", addr, e);
+                }
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn start_single_listener(addr: &str) -> std::io::Result<()> {
+    let mut listeners = ACTIVE_LISTENERS.lock().unwrap();
+    if listeners.contains_key(addr) {
+        return Ok(());
+    }
+
+    let running_flag = Arc::new(AtomicBool::new(true));
+    start_listener_thread(addr.to_string(), running_flag.clone())?;
+    listeners.insert(addr.to_string(), running_flag);
+    Ok(())
+}
+
+fn start_listener_thread(addr: String, running_flag: Arc<AtomicBool>) -> std::io::Result<()> {
+    let listener = TcpListener::bind(&addr)?;
+    println!("[AJProxy Engine] Listening socket active on http://{}", addr);
 
     thread::spawn(move || {
         for stream in listener.incoming() {
-            if !PROXY_RUNNING.load(Ordering::Relaxed) {
+            if !running_flag.load(Ordering::Relaxed) {
                 break;
             }
             match stream {
                 Ok(client_stream) => {
+                    if !running_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
                     thread::spawn(move || {
                         handle_client(client_stream);
                     });
                 }
                 Err(e) => {
-                    eprintln!("[AJProxy Engine] Accept error: {}", e);
+                    eprintln!("[AJProxy Engine] Accept error on {}: {}", addr, e);
                 }
             }
         }
@@ -88,8 +180,8 @@ fn handle_client(mut client_stream: TcpStream) {
         return;
     }
 
-    // ── Local Interceptor Landing Page on 127.0.0.1:8080 ──────────────────
-    if first_line.contains("GET / HTTP/") && (req_headers.contains("Host: 127.0.0.1") || req_headers.contains("Host: localhost")) {
+    // ── Local Interceptor Landing Page ──────────────────────────────────────
+    if first_line.contains("GET / HTTP/") || first_line.contains("GET /cert ") {
         let cert_button = if cert::get_cert_path().exists() {
             "<span class=\"badge green\">✔ Root CA Installed & Trusted</span>"
         } else {
@@ -113,7 +205,7 @@ fn handle_client(mut client_stream: TcpStream) {
             <div class=\"card\">\n\
             <h1>⚡ AJProxy Interceptor Active</h1>\n\
             <div class=\"status\">PROXY LISTENER RUNNING</div>\n\
-            <p>Your browser traffic is being proxied through <strong>AJProxy (127.0.0.1:8080)</strong>.</p>\n\
+            <p>Your browser traffic is being proxied through <strong>AJProxy</strong>.</p>\n\
             <p>All HTTP/HTTPS requests are being recorded and intercepted in real-time.</p>\n\
             <div style=\"margin-top: 25px;\">{}</div>\n\
             </div>\n\
