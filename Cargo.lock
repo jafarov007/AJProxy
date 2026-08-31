@@ -126,12 +126,15 @@ dependencies = [
 name = "ajproxy"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "eframe",
  "egui",
  "egui_extras",
  "gtk",
+ "hex",
  "home",
+ "html-escape",
  "idna_adapter",
  "lazy_static",
  "mime_guess2",
@@ -146,6 +149,7 @@ dependencies = [
  "tokio",
  "ureq",
  "url",
+ "urlencoding",
  "wry",
 ]
 
@@ -2271,6 +2275,12 @@ checksum = "e3d1354bf6b7235cb4a0576c2619fd4ed18183f689b12b006a0ee7329eeff9a5"
 dependencies = [
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "html-escape"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
 
 [[package]]
 name = "html5ever"

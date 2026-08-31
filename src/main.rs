@@ -1,5 +1,6 @@
 mod app;
 mod browser;
+mod codec;
 mod models;
 mod proxy;
 mod theme;

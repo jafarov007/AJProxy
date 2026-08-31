@@ -132,10 +132,11 @@ pub struct DecoderState {
     pub output: String,
     pub encoding: EncodingType,
     pub direction: TransformDirection,
+    pub error_msg: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum EncodingType { #[default] Base64, URL, HTML, Hex, JWT }
+pub enum EncodingType { #[default] Base64, URL, HTML, Hex, JWT, MD5, SHA1, SHA256, SHA512 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum TransformDirection { #[default] Decode, Encode }
