@@ -121,8 +121,26 @@ pub fn start_single_listener(addr: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+fn create_reuse_listener(addr_str: &str) -> std::io::Result<TcpListener> {
+    use socket2::{Socket, Domain, Type, Protocol};
+    let addr: SocketAddr = addr_str.parse().map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Invalid address {}: {}", addr_str, e))
+    })?;
+
+    let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+
+    let _ = socket.set_reuse_address(true);
+    let _ = socket.set_nonblocking(false);
+
+    socket.bind(&addr.into())?;
+    socket.listen(128)?;
+
+    Ok(socket.into())
+}
+
 fn start_listener_thread(addr: String, running_flag: Arc<AtomicBool>) -> std::io::Result<()> {
-    let listener = TcpListener::bind(&addr)?;
+    let listener = create_reuse_listener(&addr)?;
     println!("[AJProxy Engine] Listening socket active on http://{}", addr);
 
     thread::spawn(move || {
