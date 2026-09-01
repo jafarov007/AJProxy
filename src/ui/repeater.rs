@@ -24,7 +24,13 @@ fn update_request_first_line_protocol(raw_req: &str, new_proto: &str) -> String 
     raw_req.to_string()
 }
 
-pub fn render(ui: &mut egui::Ui, tabs: &mut Vec<RepeaterTab>, active_tab: &mut usize) {
+pub enum RepeaterAction {
+    None,
+    SendToIntruder(String, String, String, bool), // host, port, raw_req, is_tls
+}
+
+pub fn render(ui: &mut egui::Ui, tabs: &mut Vec<RepeaterTab>, active_tab: &mut usize) -> RepeaterAction {
+    let mut repeater_action = RepeaterAction::None;
     if tabs.is_empty() {
         tabs.push(RepeaterTab {
             name: "Tab 1".into(),
@@ -301,6 +307,11 @@ pub fn render(ui: &mut egui::Ui, tabs: &mut Vec<RepeaterTab>, active_tab: &mut u
                 });
 
             req_editor.inner.context_menu(|ui| {
+                if ui.button(RichText::new("🎯 Send to Intruder").size(12.0).color(ACCENT_AMBER).strong()).clicked() {
+                    repeater_action = RepeaterAction::SendToIntruder(tab.target_host.clone(), tab.target_port.clone(), tab.request_text.clone(), tab.is_tls);
+                    ui.close_menu();
+                }
+                ui.separator();
                 if ui.button(RichText::new("📋 Copy as cURL").size(12.0).color(TEXT_0)).clicked() {
                     let curl = format!("curl -X GET 'https://{}/' -H 'Host: {}'", tab.target_host, tab.target_host);
                     ui.output_mut(|o| o.copied_text = curl);
@@ -346,4 +357,6 @@ pub fn render(ui: &mut egui::Ui, tabs: &mut Vec<RepeaterTab>, active_tab: &mut u
             });
         });
     });
+
+    repeater_action
 }

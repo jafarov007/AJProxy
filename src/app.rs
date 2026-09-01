@@ -75,20 +75,7 @@ impl AJProxyApp {
                 }
             ],
             active_repeater_tab: 0,
-            bruteforce_state: BruteForceState {
-                target_url: "".into(),
-                method: "POST".into(),
-                headers: "".into(),
-                request_headers: "".into(),
-                body_template: "".into(),
-                payloads: "".into(),
-                payload_list: "".into(),
-                attack_type: AttackType::Sniper,
-                running: false,
-                is_running: false,
-                results: vec![],
-                progress: 0.0,
-            },
+            bruteforce_state: BruteForceState::default(),
             decoder_state: DecoderState::default(),
             comparer_state: ComparerState::default(),
             sitemap_nodes: vec![],
@@ -304,26 +291,54 @@ impl App for AJProxyApp {
                             self.active_tab = Tab::Repeater;
                         }
                     }
+                    if let Some(id) = action.send_to_bruteforce {
+                        if let Some(entry) = self.http_entries.iter().find(|e| e.id as usize == id) {
+                            let mut req_full = String::new();
+                            if !entry.request_headers.starts_with(&entry.method) {
+                                req_full.push_str(&format!("{} {} HTTP/1.1\r\n", entry.method, entry.path));
+                            }
+                            req_full.push_str(&entry.request_headers);
+                            if !req_full.ends_with("\r\n\r\n") && !req_full.ends_with("\n\n") {
+                                req_full.push_str("\r\n\r\n");
+                            }
+                            req_full.push_str(&entry.request_body);
+
+                            self.bruteforce_state.target_url = entry.url.clone();
+                            self.bruteforce_state.method = entry.method.clone();
+                            self.bruteforce_state.body_template = req_full;
+                            self.active_tab = Tab::BruteForce;
+                        }
+                    }
                 }
                 Tab::Intercept => {
-                    if let intercept::InterceptUIAction::SendToRepeater(host, port, req_raw, is_tls) = intercept::render(ui, &mut self.intercept_state, &mut self.settings, ctx) {
-                        let req_raw = crate::proxy::filters::apply_header_injection_rules(&host, req_raw);
-                        self.repeater_tabs.push(RepeaterTab {
-                            name: format!("Tab {}", self.repeater_tabs.len() + 1),
-                            target_host: host,
-                            target_port: port,
-                            protocol: "HTTP/1.1".into(),
-                            is_tls,
-                            request: req_raw.clone(),
-                            request_text: req_raw,
-                            response: String::new(),
-                            response_text: String::new(),
-                            response_headers: String::new(),
-                            status: RepeaterStatus::Ready,
-                            response_time_ms: 0,
-                        });
-                        self.active_repeater_tab = self.repeater_tabs.len() - 1;
-                        self.active_tab = Tab::Repeater;
+                    match intercept::render(ui, &mut self.intercept_state, &mut self.settings, ctx) {
+                        intercept::InterceptUIAction::SendToRepeater(host, port, req_raw, is_tls) => {
+                            let req_raw = crate::proxy::filters::apply_header_injection_rules(&host, req_raw);
+                            self.repeater_tabs.push(RepeaterTab {
+                                name: format!("Tab {}", self.repeater_tabs.len() + 1),
+                                target_host: host,
+                                target_port: port,
+                                protocol: "HTTP/1.1".into(),
+                                is_tls,
+                                request: req_raw.clone(),
+                                request_text: req_raw,
+                                response: String::new(),
+                                response_text: String::new(),
+                                response_headers: String::new(),
+                                status: RepeaterStatus::Ready,
+                                response_time_ms: 0,
+                            });
+                            self.active_repeater_tab = self.repeater_tabs.len() - 1;
+                            self.active_tab = Tab::Repeater;
+                        }
+                        intercept::InterceptUIAction::SendToIntruder(host, port, req_raw, is_tls) => {
+                            let proto = if is_tls { "https" } else { "http" };
+                            let target_url = format!("{}://{}:{}", proto, host, port);
+                            self.bruteforce_state.target_url = target_url;
+                            self.bruteforce_state.body_template = req_raw;
+                            self.active_tab = Tab::BruteForce;
+                        }
+                        intercept::InterceptUIAction::None => {}
                     }
                 }
                 Tab::WebSockets => websocket::render(
@@ -336,12 +351,20 @@ impl App for AJProxyApp {
                     &self.ws_connections,
                     &self.ws_frames,
                 ),
-                Tab::Repeater => repeater::render(
-                    ui,
-                    &mut self.repeater_tabs,
-                    &mut self.active_repeater_tab,
-                ),
-                Tab::BruteForce => bruteforce::render(ui, &mut self.bruteforce_state),
+                Tab::Repeater => {
+                    if let repeater::RepeaterAction::SendToIntruder(host, port, req_raw, is_tls) = repeater::render(
+                        ui,
+                        &mut self.repeater_tabs,
+                        &mut self.active_repeater_tab,
+                    ) {
+                        let proto = if is_tls { "https" } else { "http" };
+                        let target_url = format!("{}://{}:{}", proto, host, port);
+                        self.bruteforce_state.target_url = target_url;
+                        self.bruteforce_state.body_template = req_raw;
+                        self.active_tab = Tab::BruteForce;
+                    }
+                }
+                Tab::BruteForce => bruteforce::render(ctx, ui, &mut self.bruteforce_state),
                 Tab::Decoder => decoder::render(ui, &mut self.decoder_state),
                 Tab::Comparer => comparer::render(ui, &mut self.comparer_state),
                 Tab::SiteMap => sitemap::render(

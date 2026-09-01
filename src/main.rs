@@ -3,6 +3,7 @@ mod browser;
 mod codec;
 mod comparer;
 mod models;
+mod intruder;
 mod proxy;
 mod theme;
 mod ui;

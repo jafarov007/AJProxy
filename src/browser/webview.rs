@@ -117,6 +117,7 @@ fn spawn_fallback_browser(proxy_port: u16, target_url: &str) -> Result<(), Strin
 
     let common_args = vec![
         format!("--proxy-server={}", proxy_arg),
+        "--proxy-bypass-list=<-loopback>".to_string(),
         format!("--user-data-dir={}", profile_dir_str),
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),

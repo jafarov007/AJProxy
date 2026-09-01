@@ -11,6 +11,7 @@ const ACCENT_PURPLE: Color32 = Color32::from_rgb(192, 132, 252);
 pub enum InterceptUIAction {
     None,
     SendToRepeater(String, String, String, bool), // host, port, raw_req, is_tls
+    SendToIntruder(String, String, String, bool), // host, port, raw_req, is_tls
 }
 
 pub fn render(
@@ -227,6 +228,22 @@ fn truncate_intercept_str(s: &str, max_chars: usize) -> String {
                                     raw_full.push_str(&item.body);
 
                                     ui_action = InterceptUIAction::SendToRepeater(item.host.clone(), port.to_string(), raw_full, is_tls);
+                                }
+                                ui.add_space(4.0);
+                                if ui.add(egui::Button::new(RichText::new("🎯 Send to Intruder").size(11.0).color(ACCENT_AMBER))).clicked() {
+                                    let is_tls = item.url.starts_with("https");
+                                    let port = if is_tls { "443" } else { "80" };
+                                    let mut raw_full = String::new();
+                                    if !item.headers.starts_with(&item.method) {
+                                        raw_full.push_str(&format!("{} {} HTTP/1.1\r\n", item.method, item.path));
+                                    }
+                                    raw_full.push_str(&item.headers);
+                                    if !raw_full.ends_with("\r\n\r\n") && !raw_full.ends_with("\n\n") {
+                                        raw_full.push_str("\r\n\r\n");
+                                    }
+                                    raw_full.push_str(&item.body);
+
+                                    ui_action = InterceptUIAction::SendToIntruder(item.host.clone(), port.to_string(), raw_full, is_tls);
                                 }
                                 ui.add_space(4.0);
                                 if ui.add(egui::Button::new(RichText::new("✖ Drop").size(11.0).color(TEXT_0).strong()).fill(ACCENT_RED)).clicked() {

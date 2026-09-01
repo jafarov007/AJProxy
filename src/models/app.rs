@@ -82,7 +82,13 @@ pub enum AttackType {
     #[default] Sniper, BatteringRam, Pitchfork, ClusterBomb,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct PayloadSet {
+    pub name: String,
+    pub payloads_text: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct BruteForceState {
     pub target_url: String,
     pub method: String,
@@ -90,12 +96,58 @@ pub struct BruteForceState {
     pub request_headers: String,
     pub body_template: String,
     pub payloads: String,
-    pub payload_list: String,
+    pub payload_sets: Vec<PayloadSet>,
+    pub active_set_index: usize,
+    pub show_payload_modal: bool,
+    pub new_set_name: String,
+    pub new_set_payloads: String,
     pub attack_type: AttackType,
+    pub delay_sec_input: String,
+    pub concurrency_input: String,
     pub running: bool,
     pub is_running: bool,
     pub results: Vec<BruteResult>,
     pub progress: f32,
+    // Status Code & Search Filters
+    pub filter_status_code: String,
+    pub ignore_status_code: String,
+    pub search_filter: String,
+    // Position to Payload Set mapping
+    pub position_set_indices: Vec<usize>,
+    // Real-time async / batch queue state
+    pub pending_queue: Vec<(String, String)>,
+    pub last_batch_time: Option<std::time::Instant>,
+}
+
+impl Default for BruteForceState {
+    fn default() -> Self {
+        Self {
+            target_url: String::new(),
+            method: "POST".to_string(),
+            headers: String::new(),
+            request_headers: String::new(),
+            body_template: "POST /scenario/1/api/v1/login HTTP/1.1\r\nHost: localhost:8080\r\nContent-Type: application/json\r\n\r\n{\n  \"email\": \"§user.a@example.com§\",\n  \"password\": \"§password123§\"\n}".to_string(),
+            payloads: String::new(),
+            payload_sets: Vec::new(),
+            active_set_index: 0,
+            show_payload_modal: false,
+            new_set_name: String::new(),
+            new_set_payloads: String::new(),
+            attack_type: AttackType::Sniper,
+            delay_sec_input: "0.5".to_string(),
+            concurrency_input: "1".to_string(),
+            running: false,
+            is_running: false,
+            results: Vec::new(),
+            progress: 0.0,
+            filter_status_code: String::new(),
+            ignore_status_code: String::new(),
+            search_filter: String::new(),
+            position_set_indices: Vec::new(),
+            pending_queue: Vec::new(),
+            last_batch_time: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

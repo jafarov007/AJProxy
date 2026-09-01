@@ -56,6 +56,10 @@ pub fn render_full_cell(
             action.send_to_repeater = Some(entry.id as usize);
             ui.close_menu();
         }
+        if ui.button("🎯 Send to Intruder").clicked() {
+            action.send_to_bruteforce = Some(entry.id as usize);
+            ui.close_menu();
+        }
         ui.separator();
         if ui.button("📋 Copy URL").clicked() {
             ui.output_mut(|o| o.copied_text = entry.url.clone());

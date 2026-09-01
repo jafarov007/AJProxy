@@ -4,67 +4,124 @@
   <img src="banner.png" alt="AJProxy Banner" width="100%">
 </p>
 
-AJProxy is an ultra-fast, lightweight, and professional HTTP/HTTPS interception proxy and security testing tool built from the ground up in Rust (**7,400+ lines of pure Rust code**). Leveraging Rust's memory safety, concurrency model, and high performance, AJProxy delivers sub-millisecond packet interception with a minimal system memory footprint. 
+AJProxy is a high-performance, lightweight HTTP/HTTPS interception proxy and penetration testing workbench written from the ground up in Rust. Designed for security researchers, ethical hackers, and software engineers, AJProxy delivers low-latency packet processing with a minimal memory footprint.
 
-It features a modern graphical user interface powered by `egui`, enabling security researchers and ethical hackers to intercept, inspect, and modify web & WebSocket traffic in real time.
-
----
-
-## 🌟 Key Features
-
-### ⚡ RFC 6455 WebSocket Suite
-- **WS History**: Live WebSocket traffic viewer with connection session tree, directional stream table (**⬆️ Client** / **⬇️ Server**), colored Opcode badges (`TEXT`, `BINARY`, `PING`, `PONG`, `CLOSE`), and multi-mode inspector (**Raw Text**, **Formatted Hex Dump**, **JSON**).
-- **WS Intercept**: Pause live incoming and outgoing WebSocket frames on the fly, edit payloads and Opcodes, and issue **▶️ Forward** or **✖ Drop** actions.
-- **WS Repeater Workbench**: Multi-tabbed interactive testing workbench for custom WebSocket endpoints (`wss://` and `ws://`) with custom frame generation and real-time response event logging.
-- **Protocol Features**: Full support for RFC 6455 4-byte XOR masking/unmasking, 2-byte Close status code parsing (e.g., `1000 Normal`, `1001 Going Away`, `1006 Abnormal`), auto Ping/Pong mirroring, and fragmented frame reassembly (`FIN=0` + `Continuation 0x0`).
-
-### 🛡️ Real-Time HTTP/HTTPS Interception & Header Engine
-- **Send to Repeater**: One-click transfer from traffic history to the interactive Repeater workbench.
-- **Custom Header & Key Auto-Injection**: Define custom header rules (e.g. `X-Bounty-Key: secret123`, `X-Forwarded-For: 127.0.0.1`) with target domain scoping (`*target*` or `*` global). Automatically injects headers into all HTTP requests and WebSocket handshakes (`Upgrade: websocket`).
-- **Advanced Traffic & Noise Filtering**:
-  - **Host Filter Modal**: Wildcard & substring domain filtering (e.g., `*target*`, `api.example.com`) to isolate target application scope.
-  - **Zero-Byte Suppression**: One-click toggle to suppress 0-length responses (e.g., 204 No Content, empty preflight packets).
-  - **Pre-Configured Asset Filtering**: Hides `.css`, `.js`, `.png`, `.jpg`, `.gif`, `.svg`, `.ico`, `.woff2`, Cloudflare challenges, and telemetry.
-
-### 🔑 Certificate Trust Engine & Platform Support
-- **Modular OS Installers** (`linux.rs`, `windows.rs`, `macos.rs`): Generates 365-day compliant Root CA certificates with one-click automatic CA trust installation for system and browser trust stores.
-- **Direct TCP Media Passthrough**: Zero-overhead passthrough for video streaming CDNs (`googlevideo.com`, `gvt1.com`, `ytimg.com`) ensuring 4K video streaming without buffering.
-
-> [!NOTE]
-> **Platform Support Status:**
-> - **Linux**: Fully tested, rock-solid, and ready for production/daily security research. Automatic Root CA trust installation and browser interception work out-of-the-box seamlessly.
-> - **Windows & macOS**: Automatic Root CA system trust installation and embedded browser integration are currently undergoing active testing, bug fixes, and continuous refinement.
+Featuring a dark-themed graphical user interface built with `egui`, AJProxy provides real-time HTTP/HTTPS traffic analysis, interactive request manipulation, an advanced RFC 6455 WebSocket suite, and a customizable Intruder engine.
 
 ---
 
-## 🌐 Remote Device Access & CA Certificate Installation
+## Table of Contents
 
-To intercept traffic from mobile phones, tablets, or other computers on the same local network:
-
-1. Navigate to **Settings** in AJProxy.
-2. Change the **Bind Address** from `127.0.0.1` to `0.0.0.0` and ensure the listener is active.
-3. Configure the remote device's Wi-Fi/Network proxy settings to point to `http://<YOUR_HOST_IP>:8080`.
-4. On the remote device, open a web browser and visit `http://<YOUR_HOST_IP>:8080` or `http://<YOUR_HOST_IP>:8080/cert` to instantly download and install the AJProxy Root CA Certificate (`ajproxy_ca.crt`).
-
-### 🛠️ Security Testing Toolkit
-- Integrated modules: **Dashboard**, **HTTP Traffic History**, **HTTP Repeater**, **WebSocket Suite**, **Sitemap**, **Comparer**, **Decoder**, **Intruder/Bruteforce**, and **Settings**.
-
----
-
-## ⚖️ Legal & Educational Disclaimer
-
-> **IMPORTANT**: AJProxy is strictly intended for **authorized penetration testing, ethical security research, and educational purposes only**. You may only use this tool against computer systems, web applications, and networks for which you have explicit, documented authorization from the owner.
-> 
-> The developers and contributors of AJProxy assume no liability and are not responsible for any misuse, damage, unauthorized interception, or illegal activity conducted with this software. Users bear full responsibility for compliance with all applicable local, national, and international cyber laws.
+- [Overview](#overview)
+- [Core Architecture & Modules](#core-architecture--modules)
+  - [HTTP/HTTPS Interception & History](#httphttps-interception--history)
+  - [Intruder Engine & Fuzzing Suite](#intruder-engine--fuzzing-suite)
+  - [RFC 6455 WebSocket Suite](#rfc-6455-websocket-suite)
+  - [Certificate Engine & OS Integration](#certificate-engine--os-integration)
+  - [Repeater, Decoder, Comparer & Sitemap](#repeater-decoder-comparer--sitemap)
+- [Remote Device Interception](#remote-device-interception)
+- [Platform Support Status](#platform-support-status)
+- [Installation & Prerequisites](#installation--prerequisites)
+- [Building & Running](#building--running)
+- [Legal Disclaimer](#legal-disclaimer)
+- [License](#license)
 
 ---
 
-## 📋 Prerequisites
+## Overview
 
-To build and run AJProxy, ensure you have Rust (`cargo`) installed.
+AJProxy operates as a local proxy listener that intercepts HTTP and HTTPS connections between target applications and remote servers. By combining Rust's async networking model with an immediate-mode UI framework, AJProxy handles high-throughput web traffic while maintaining sub-millisecond response latency.
 
-### Linux (Debian/Ubuntu) Dependencies
-Install the required system build tools and development libraries:
+Key highlights include:
+- Pure Rust codebase (~7,500+ LOC) with no heavyweight browser or JVM overhead.
+- Native TLS interception using dynamic 365-day Root CA generation.
+- Real-time parameter extraction and multi-payload fuzzing.
+- Full RFC 6455 WebSocket framing, masking/unmasking, and live frame modification.
+
+---
+
+## Core Architecture & Modules
+
+### HTTP/HTTPS Interception & History
+
+- **Traffic Stream**: View captured HTTP/HTTPS requests and responses in real time with status code coloring, latency measurements, and response size details.
+- **Scope & Noise Suppression**: Wildcard domain filtering (`*target*`) to focus on scope targets while hiding background noise (static assets, fonts, CDNs, analytics).
+- **Rule-Based Header Injection**: Dynamically inject custom headers (e.g., `X-Forwarded-For`, auth tokens) into requests and WebSocket upgrade handshakes matching defined target host patterns.
+- **Live Intercept Mode**: Pause live HTTP requests before they leave your machine, modify method, URI, headers, or body, and forward or drop packets.
+
+### Intruder Engine & Fuzzing Suite
+
+The Intruder engine enables automated custom attacks against web endpoints:
+
+- **Position Marking Controls**:
+  - **`Add §`**: Highlights selected text in the request template editor and wraps it in position markers (`§selection§`).
+  - **`Auto §`**: Automatically detects URL query parameters (`?key=val`), Form data (`key=val`), and JSON fields (`"key": "val"`) and places position markers around values.
+  - **`Clear §`**: Removes all position markers with a single click.
+- **Attack Modes**:
+  - **Sniper**: Targets marked positions sequentially using a single payload set.
+  - **Battering Ram**: Replaces all marked positions simultaneously with the same payload item.
+  - **Pitchfork**: Iterates multiple payload sets in parallel (1-to-1 matching across positions).
+  - **Cluster Bomb**: Performs Cartesian product combinations across all assigned payload sets.
+- **Payload & Set Management**:
+  - In-memory payload set creation, editing, and deletion without forced file persistence.
+  - Multi-position assignment dropdowns allowing custom binding of payload sets to specific `§ Pos N` markers.
+- **Pacing & Concurrency Controls**:
+  - **`Delay (s)`**: Configurable time delay between request batches (e.g., `0.5`, `2.0`, or `0` for maximum speed).
+  - **`Concurrency`**: Configurable batch size / concurrent threads per step.
+  - **Real-Time Asynchronous Execution**: Streamed execution engine that yields live results in real-time as batches complete.
+- **Filtering & Search**: Instant result filtering by status code inclusion/exclusion (e.g., `200,302` or `!404`), payload string search, and latency/size details.
+
+### RFC 6455 WebSocket Suite
+
+- **WS Traffic History**: Directional frame table (`⬆ Client` / `⬇ Server`) displaying Opcode types (`TEXT`, `BINARY`, `PING`, `PONG`, `CLOSE`), payload size, and timestamps.
+- **Multi-Format Inspector**: View raw WebSocket payload data as formatted text, pretty JSON, or a hexadecimal dump.
+- **WS Intercept Workbench**: Pause incoming or outgoing WebSocket frames on the fly, edit payload contents or Opcode types, and issue `Forward` or `Drop`.
+- **WS Repeater Workbench**: Multi-tabbed interactive testing tool to construct and transmit custom WebSocket frames over `ws://` and `wss://` connections.
+
+### Certificate Engine & OS Integration
+
+- **Automatic CA Generation**: Generates 365-day Root CA certificates (`ajproxy_ca.crt`) stored in `~/.ajproxy/`.
+- **System Trust Automation**: OS-specific installer module for Linux (`Linux CA Trust`) to install the CA certificate into local system and browser trust stores.
+- **Pass-Through Engine**: Bypass TLS decryption for non-target streaming endpoints (e.g., YouTube video CDNs) to preserve bandwidth and performance.
+
+### Repeater, Decoder, Comparer & Sitemap
+
+- **HTTP Repeater**: Modify and re-send captured HTTP requests in isolated tabbed environments.
+- **Decoder**: Perform URL, Base64, Hex, and HTML entity encoding/decoding operations.
+- **Comparer**: Visual word and byte-level diff utility to compare HTTP responses.
+- **Sitemap**: Auto-generated hierarchical site tree displaying discovered hosts, endpoints, and paths.
+
+---
+
+## Remote Device Interception
+
+To intercept HTTP/HTTPS traffic from mobile devices, tablets, or secondary machines on your local network:
+
+1. Open **Settings** in AJProxy.
+2. Set the listener **Bind Address** to `0.0.0.0` and confirm the active port (default `8080`).
+3. Configure the remote device's proxy settings to point to your host IP: `http://<YOUR_IP>:8080`.
+4. Open a browser on the remote device and visit `http://<YOUR_IP>:8080/cert` to download and install the Root CA Certificate.
+
+---
+
+## Platform Support Status
+
+| Platform | Support Status | Root CA Automation | Notes |
+| :--- | :--- | :--- | :--- |
+| **Linux** | Supported | Fully Automated | Tested on Debian/Ubuntu/Kali. Recommended for daily security research. |
+| **Windows** | In Progress | Manual / Experimental | Core proxy works. System trust integration undergoing testing. |
+| **macOS** | In Progress | Manual / Experimental | Core proxy works. System trust integration undergoing testing. |
+
+---
+
+## Installation & Prerequisites
+
+Ensure Rust and `cargo` are installed on your system.
+
+### Linux System Dependencies
+
+On Debian, Ubuntu, or Kali Linux, install the required build packages:
+
 ```bash
 sudo apt update
 sudo apt install -y build-essential pkg-config libssl-dev libgtk-3-dev
@@ -72,20 +129,33 @@ sudo apt install -y build-essential pkg-config libssl-dev libgtk-3-dev
 
 ---
 
-## 🚀 How to Run
+## Building & Running
 
-Clone or navigate to the project directory and run the application using Cargo:
+Clone the repository and compile in release mode for optimal performance:
 
 ```bash
+git clone https://github.com/jafarov007/AJProxy.git
+cd AJProxy
 cargo run --release
+```
+
+To run a quick debug check:
+
+```bash
+cargo check
 ```
 
 ---
 
-## 🤝 Contributing
+## Legal Disclaimer
 
-We welcome contributions from the community! Please read [CONTRIBUTING.md](CONTRIBUTING.md) to learn how to propose changes, report bugs, and build the project locally.
+> [!IMPORTANT]
+> **Authorized Testing Only**: AJProxy is designed exclusively for authorized penetration testing, security auditing, and educational research. You must obtain explicit written permission from the system owner before analyzing any network, application, or system.
+> 
+> The authors and maintainers of AJProxy assume no responsibility for unauthorized access, misuse, or data loss resulting from the use of this software.
 
-## 📜 License
+---
 
-This project is licensed under the terms specified in the LICENSE file.
+## License
+
+This project is licensed under the terms defined in the [LICENSE](LICENSE) file.
