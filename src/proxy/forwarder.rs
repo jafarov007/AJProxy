@@ -86,12 +86,14 @@ pub fn forward_http_request(mut client_stream: TcpStream, req_headers: &str, req
                     if let Some((k, v)) = line.split_once(':') {
                         let k = k.trim();
                         let v = v.trim();
-                        if !k.eq_ignore_ascii_case("Proxy-Connection") && !k.eq_ignore_ascii_case("Host") {
-                            if k.eq_ignore_ascii_case("Accept-Encoding") {
-                                req = req.set(k, "gzip, deflate");
-                            } else {
-                                req = req.set(k, v);
-                            }
+                        if !k.eq_ignore_ascii_case("Proxy-Connection")
+                            && !k.eq_ignore_ascii_case("Proxy-Authorization")
+                            && !k.eq_ignore_ascii_case("Host")
+                            && !k.eq_ignore_ascii_case("Connection")
+                            && !k.eq_ignore_ascii_case("Content-Length")
+                            && !k.eq_ignore_ascii_case("Accept-Encoding")
+                        {
+                            req = req.set(k, v);
                         }
                     }
                 }
@@ -106,7 +108,10 @@ pub fn forward_http_request(mut client_stream: TcpStream, req_headers: &str, req
                     Ok(r) => Some(r),
                     Err(ureq::Error::Status(_, r)) => Some(r),
                     Err(e) => {
-                        eprintln!("[AJProxy Forwarder] Request error for {}: {}", full_url, e);
+                        let err_msg = e.to_string();
+                        if !err_msg.contains("Unexpected EOF") && !err_msg.contains("Connection reset") && !err_msg.contains("wrong version number") {
+                            eprintln!("[AJProxy Forwarder] Request error for {}: {}", full_url, e);
+                        }
                         None
                     }
                 };

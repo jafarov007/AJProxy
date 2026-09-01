@@ -7,117 +7,84 @@ pub fn render(ui: &mut egui::Ui, settings: &mut AppSettings) {
     ScrollArea::vertical()
         .id_source("settings_scroll_area")
         .show(ui, |ui| {
-            // ── Section 1: Proxy Listeners & Binding Settings ─────────────────
+            // ── Section 1: Proxy Listener & Binding Settings ─────────────────
             section_frame().show(ui, |ui| {
                 let mut listener_changed = false;
 
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Proxy Listeners & Binding Interfaces").size(13.0).color(TEXT_0).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(
-                            egui::Button::new(RichText::new("+ Add New Listener").size(11.0).color(TEXT_0).strong())
-                                .fill(ACCENT_BLUE)
-                                .rounding(Rounding::same(4.0))
-                        ).clicked() {
-                            let next_port = 8080 + settings.listeners.len() as u16;
-                            settings.listeners.push(ProxyListenerConfig {
-                                enabled: true,
-                                bind_address: "0.0.0.0".into(),
-                                bind_port: next_port,
-                                protocol: "Auto".into(),
-                                tls_mitm: true,
-                            });
-                            listener_changed = true;
-                        }
+                // Ensure exactly 1 listener configuration exists
+                if settings.listeners.is_empty() {
+                    settings.listeners.push(ProxyListenerConfig {
+                        enabled: true,
+                        bind_address: "127.0.0.1".into(),
+                        bind_port: 8080,
+                        protocol: "Auto".into(),
+                        tls_mitm: true,
                     });
+                    listener_changed = true;
+                } else if settings.listeners.len() > 1 {
+                    settings.listeners.truncate(1);
+                    listener_changed = true;
+                }
+
+                ui.label(RichText::new("Proxy Listener & Binding Interface").size(13.0).color(TEXT_0).strong());
+                let local_ip = crate::proxy::listener::get_local_ip();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Configure binding address and port (Use 0.0.0.0 for mobile device proxying).").size(11.0).color(TEXT_2));
+                    ui.label(RichText::new(format!("(Detected LAN IP: {})", local_ip)).size(11.0).color(ACCENT_BLUE).strong());
                 });
-                ui.label(RichText::new("Configure binding addresses and ports (Use 0.0.0.0 for mobile device proxying).").size(11.0).color(TEXT_2));
                 ui.separator();
                 ui.add_space(4.0);
 
-                // Listeners Grid Table
-                let mut to_delete: Option<usize> = None;
+                let listener = &mut settings.listeners[0];
 
-                // Table Header
                 ui.horizontal(|ui| {
-                    ui.add_space(30.0);
-                    ui.label(RichText::new("Bind Address").size(11.0).color(TEXT_1).strong());
-                    ui.add_space(60.0);
-                    ui.label(RichText::new("Port").size(11.0).color(TEXT_1).strong());
-                    ui.add_space(30.0);
-                    ui.label(RichText::new("Status").size(11.0).color(TEXT_1).strong());
-                    ui.add_space(35.0);
-                    ui.label(RichText::new("Protocol").size(11.0).color(TEXT_1).strong());
-                    ui.add_space(20.0);
-                    ui.label(RichText::new("TLS MITM").size(11.0).color(TEXT_1).strong());
-                });
-                ui.separator();
-
-                for (idx, listener) in settings.listeners.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        if ui.checkbox(&mut listener.enabled, "").changed() {
-                            listener_changed = true;
-                        }
-
-                        // Address Input
-                        if ui.add(egui::TextEdit::singleline(&mut listener.bind_address).desired_width(130.0)).changed() {
-                            listener_changed = true;
-                        }
-
-                        // Port Input
-                        let mut p_str = listener.bind_port.to_string();
-                        if ui.add(egui::TextEdit::singleline(&mut p_str).desired_width(55.0)).changed() {
-                            if let Ok(p) = p_str.parse::<u16>() {
-                                listener.bind_port = p;
-                                listener_changed = true;
-                            }
-                        }
-
-                        // Status Badge
-                        let is_running = crate::proxy::listener::is_listener_running(&listener.bind_address, listener.bind_port);
-                        let (status_text, status_color) = if is_running && listener.enabled {
-                            ("● Running", ACCENT_GREEN)
-                        } else {
-                            ("○ Stopped", TEXT_2)
-                        };
-                        ui.label(RichText::new(status_text).size(10.0).color(status_color).strong());
-
-                        // Protocol Selector
-                        egui::ComboBox::from_id_source(format!("proto_combo_{}", idx))
-                            .selected_text(&listener.protocol)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut listener.protocol, "Auto".into(), "Auto");
-                                ui.selectable_value(&mut listener.protocol, "HTTP/1.1".into(), "HTTP/1.1");
-                                ui.selectable_value(&mut listener.protocol, "HTTP/2".into(), "HTTP/2");
-                            });
-
-                        // TLS Checkbox
-                        ui.checkbox(&mut listener.tls_mitm, "Enable TLS");
-
-                        // Delete Listener Button
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(
-                                egui::Button::new(RichText::new("✖ Delete").size(11.0).color(ACCENT_RED))
-                                    .fill(BG_RAISED)
-                                    .stroke(Stroke::new(0.5_f32, BORDER))
-                            ).clicked() {
-                                to_delete = Some(idx);
-                            }
-                        });
-                    });
-                    ui.add_space(2.0);
-                }
-
-                if let Some(idx) = to_delete {
-                    if settings.listeners.len() > 1 {
-                        settings.listeners.remove(idx);
+                    // Running Enable/Disable Checkbox
+                    if ui.checkbox(&mut listener.enabled, "").changed() {
                         listener_changed = true;
-                    } else {
-                        settings.cert_status_msg = "Cannot delete the last remaining listener.".into();
                     }
-                }
 
-                // Keep main listen_address and listen_port in sync & trigger dynamic socket binding on change
+                    ui.label(RichText::new("Address:").size(11.0).color(TEXT_1).strong());
+                    if ui.add(egui::TextEdit::singleline(&mut listener.bind_address).desired_width(130.0)).changed() {
+                        listener_changed = true;
+                    }
+
+                    ui.add_space(10.0);
+                    ui.label(RichText::new("Port:").size(11.0).color(TEXT_1).strong());
+                    let mut p_str = listener.bind_port.to_string();
+                    if ui.add(egui::TextEdit::singleline(&mut p_str).desired_width(55.0)).changed() {
+                        if let Ok(p) = p_str.parse::<u16>() {
+                            listener.bind_port = p;
+                            listener_changed = true;
+                        }
+                    }
+
+                    ui.add_space(10.0);
+                    // Status Badge
+                    let is_running = crate::proxy::listener::is_listener_running(&listener.bind_address, listener.bind_port);
+                    let (status_text, status_color) = if is_running && listener.enabled {
+                        ("● Running", ACCENT_GREEN)
+                    } else {
+                        ("○ Stopped", TEXT_2)
+                    };
+                    ui.label(RichText::new(status_text).size(11.0).color(status_color).strong());
+
+                    ui.add_space(15.0);
+                    // Protocol Selector
+                    ui.label(RichText::new("Protocol:").size(11.0).color(TEXT_1).strong());
+                    egui::ComboBox::from_id_source("proto_combo_0")
+                        .selected_text(&listener.protocol)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut listener.protocol, "Auto".into(), "Auto");
+                            ui.selectable_value(&mut listener.protocol, "HTTP/1.1".into(), "HTTP/1.1");
+                            ui.selectable_value(&mut listener.protocol, "HTTP/2".into(), "HTTP/2");
+                        });
+
+                    ui.add_space(15.0);
+                    // TLS Checkbox
+                    ui.checkbox(&mut listener.tls_mitm, "Enable TLS");
+                });
+
+                // Keep main listen_address and listen_port in sync & trigger socket binding on change
                 settings.sync_active_listener();
                 if listener_changed {
                     crate::proxy::listener::sync_listeners(&settings.listeners);

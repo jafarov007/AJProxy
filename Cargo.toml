@@ -20,7 +20,7 @@ rfd = "0.14"
 wry = "0.38"
 tao = "0.26"
 tokio = { version = "1", features = ["full"] }
-ureq = "2.12"
+ureq = { version = "2.12", features = ["native-tls", "brotli"] }
 url = "2.5"
 lazy_static = "1.5"
 native-tls = "0.2"
@@ -31,6 +31,7 @@ urlencoding = "2.1"
 html-escape = "0.2"
 similar = "2.4"
 socket2 = "0.5"
+libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"

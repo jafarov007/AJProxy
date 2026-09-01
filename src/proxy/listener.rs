@@ -14,13 +14,32 @@ use crate::proxy::forwarder::forward_http_request;
 pub use crate::proxy::store::*;
 
 lazy_static::lazy_static! {
-    pub static ref UPSTREAM_AGENT: ureq::Agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(60))
-        .max_idle_connections(100)
-        .max_idle_connections_per_host(10)
-        .build();
+    pub static ref UPSTREAM_AGENT: ureq::Agent = {
+        let tls_connector = native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap_or_else(|_| native_tls::TlsConnector::new().unwrap());
+
+        ureq::AgentBuilder::new()
+            .tls_connector(Arc::new(tls_connector))
+            .timeout(Duration::from_secs(60))
+            .max_idle_connections(100)
+            .max_idle_connections_per_host(10)
+            .build()
+    };
 
     static ref ACTIVE_LISTENERS: Mutex<HashMap<String, Arc<AtomicBool>>> = Mutex::new(HashMap::new());
+}
+
+pub fn get_local_ip() -> String {
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                return addr.ip().to_string();
+            }
+        }
+    }
+    "127.0.0.1".into()
 }
 
 pub fn is_listener_running(bind_address: &str, port: u16) -> bool {
@@ -46,19 +65,21 @@ pub fn sync_listeners(configs: &[ProxyListenerConfig]) {
     let mut desired_map: HashMap<String, bool> = HashMap::new();
     let mut used_ports: HashMap<u16, String> = HashMap::new();
 
-    // First pass: register 0.0.0.0 addresses
+    // First pass: register valid 0.0.0.0 addresses
     for cfg in configs {
-        if cfg.enabled && cfg.bind_address == "0.0.0.0" {
-            let addr = format!("{}:{}", cfg.bind_address, cfg.bind_port);
+        let trimmed_ip = cfg.bind_address.trim();
+        if cfg.enabled && trimmed_ip == "0.0.0.0" {
+            let addr = format!("{}:{}", trimmed_ip, cfg.bind_port);
             desired_map.insert(addr.clone(), true);
             used_ports.insert(cfg.bind_port, addr);
         }
     }
 
-    // Second pass: register other addresses if port not already taken
+    // Second pass: register other valid IP addresses if port not already taken by 0.0.0.0
     for cfg in configs {
-        if cfg.enabled && cfg.bind_address != "0.0.0.0" {
-            let addr = format!("{}:{}", cfg.bind_address, cfg.bind_port);
+        let trimmed_ip = cfg.bind_address.trim();
+        if cfg.enabled && trimmed_ip != "0.0.0.0" && trimmed_ip.parse::<std::net::IpAddr>().is_ok() {
+            let addr = format!("{}:{}", trimmed_ip, cfg.bind_port);
             if !used_ports.contains_key(&cfg.bind_port) {
                 desired_map.insert(addr.clone(), true);
                 used_ports.insert(cfg.bind_port, addr);
@@ -131,6 +152,22 @@ fn create_reuse_listener(addr_str: &str) -> std::io::Result<TcpListener> {
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
 
     let _ = socket.set_reuse_address(true);
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let optval: libc::c_int = 1;
+        unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_REUSEPORT,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+
     let _ = socket.set_nonblocking(false);
 
     socket.bind(&addr.into())?;
@@ -177,67 +214,92 @@ fn handle_client(mut client_stream: TcpStream) {
     let req_body = String::from_utf8_lossy(&req_body_bytes).to_string();
 
     let first_line = req_headers.lines().next().unwrap_or("");
+    let path_part = first_line.split_whitespace().nth(1).unwrap_or("");
 
-    // ── HTTP / cert Root CA Download Route ─────────────────────────────────
-    if first_line.contains("GET /cert ") {
-        if let Ok(ca_pem) = std::fs::read_to_string(cert::get_cert_path()) {
+    let host_hdr = req_headers.lines().find_map(|l| {
+        if l.to_lowercase().starts_with("host:") {
+            l.split_once(':').map(|(_, h)| h.trim())
+        } else {
+            None
+        }
+    }).unwrap_or("");
+
+    let is_direct_local = host_hdr.contains("127.0.0.1")
+        || host_hdr.contains("localhost")
+        || host_hdr.contains("0.0.0.0")
+        || host_hdr.contains("192.168.")
+        || host_hdr.contains(":8080")
+        || path_part.contains("ajproxy");
+
+    if is_direct_local {
+        // ── HTTP / cert Root CA Download Route ─────────────────────────────────
+        if path_part.ends_with("/cert") || path_part == "/cert" || first_line.contains("/cert") {
+            if let Ok(ca_pem) = std::fs::read_to_string(cert::get_cert_path()) {
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: application/x-pem-file\r\n\
+                     Content-Disposition: attachment; filename=\"ajproxy_ca.crt\"\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n{}",
+                    ca_pem.len(),
+                    ca_pem
+                );
+                let _ = client_stream.write_all(resp.as_bytes());
+            } else {
+                let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nRoot CA Certificate not found.";
+                let _ = client_stream.write_all(resp.as_bytes());
+            }
+            return;
+        }
+
+        // ── Local Favicon Route ───────────────────────────────────────────────
+        if path_part.contains("favicon.ico") {
+            let resp = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+            let _ = client_stream.write_all(resp.as_bytes());
+            return;
+        }
+
+        // ── Local Interceptor Landing Page ──────────────────────────────────────
+        if path_part == "/" || path_part.ends_with(":8080/") || first_line.contains("ajproxy") {
+            let cert_button = if cert::get_cert_path().exists() {
+                "<span class=\"badge green\">✔ Root CA Installed & Trusted</span><br><br><a href=\"/cert\" class=\"btn\">📥 Download Root CA Certificate (.crt)</a>"
+            } else {
+                "<a href=\"/cert\" class=\"btn\">📥 Download & Install Root CA Certificate (.crt)</a>"
+            };
+
+            let html = format!(
+                "<!DOCTYPE html>\n<html>\n<head><meta charset=\"UTF-8\"><title>AJProxy Interceptor Active</title>\n\
+                <style>\n\
+                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; text-align: center; padding: 60px 20px; }}\n\
+                .card {{ background: #1e293b; max-width: 580px; margin: 0 auto; padding: 40px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }}\n\
+                h1 {{ color: #38bdf8; font-size: 28px; margin-bottom: 12px; }}\n\
+                p {{ color: #94a3b8; font-size: 15px; line-height: 1.6; }}\n\
+                .status {{ display: inline-block; background: #0284c7; color: white; padding: 6px 14px; border-radius: 20px; font-weight: 600; font-size: 13px; margin: 15px 0; }}\n\
+                .btn {{ display: inline-block; background: #10b981; color: white; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 600; margin-top: 20px; transition: background 0.2s; }}\n\
+                .btn:hover {{ background: #059669; }}\n\
+                .badge {{ display: inline-block; padding: 8px 16px; border-radius: 6px; font-weight: 600; margin-top: 15px; }}\n\
+                .badge.green {{ background: #064e3b; color: #34d399; border: 1px solid #059669; }}\n\
+                </style></head>\n\
+                <body>\n\
+                <div class=\"card\">\n\
+                <h1>⚡ AJProxy Interceptor Active</h1>\n\
+                <div class=\"status\">PROXY LISTENER RUNNING</div>\n\
+                <p>Your browser traffic is being proxied through <strong>AJProxy</strong>.</p>\n\
+                <p>All HTTP/HTTPS requests are being recorded and intercepted in real-time.</p>\n\
+                <div style=\"margin-top: 25px;\">{}</div>\n\
+                </div>\n\
+                </body></html>",
+                cert_button
+            );
+
             let resp = format!(
-                "HTTP/1.1 200 OK\r\n\
-                 Content-Type: application/x-pem-file\r\n\
-                 Content-Disposition: attachment; filename=\"ajproxy_ca.crt\"\r\n\
-                 Content-Length: {}\r\n\
-                 Connection: close\r\n\r\n{}",
-                ca_pem.len(),
-                ca_pem
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                html.as_bytes().len(),
+                html
             );
             let _ = client_stream.write_all(resp.as_bytes());
-        } else {
-            let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nRoot CA Certificate not found.";
-            let _ = client_stream.write_all(resp.as_bytes());
+            return;
         }
-        return;
-    }
-
-    // ── Local Interceptor Landing Page ──────────────────────────────────────
-    if first_line.contains("GET / HTTP/") || first_line.contains("GET /cert ") {
-        let cert_button = if cert::get_cert_path().exists() {
-            "<span class=\"badge green\">✔ Root CA Installed & Trusted</span>"
-        } else {
-            "<a href=\"/cert\" class=\"btn\">📥 Download & Install Root CA Certificate (.crt)</a>"
-        };
-
-        let html = format!(
-            "<!DOCTYPE html>\n<html>\n<head><title>AJProxy Interceptor Active</title>\n\
-            <style>\n\
-            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; text-align: center; padding: 60px 20px; }}\n\
-            .card {{ background: #1e293b; max-width: 580px; margin: 0 auto; padding: 40px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }}\n\
-            h1 {{ color: #38bdf8; font-size: 28px; margin-bottom: 12px; }}\n\
-            p {{ color: #94a3b8; font-size: 15px; line-height: 1.6; }}\n\
-            .status {{ inline-block; background: #0284c7; color: white; padding: 6px 14px; border-radius: 20px; font-weight: 600; font-size: 13px; margin: 15px 0; }}\n\
-            .btn {{ display: inline-block; background: #10b981; color: white; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 600; margin-top: 20px; transition: background 0.2s; }}\n\
-            .btn:hover {{ background: #059669; }}\n\
-            .badge {{ display: inline-block; padding: 8px 16px; border-radius: 6px; font-weight: 600; margin-top: 15px; }}\n\
-            .badge.green {{ background: #064e3b; color: #34d399; border: 1px solid #059669; }}\n\
-            </style></head>\n\
-            <body>\n\
-            <div class=\"card\">\n\
-            <h1>⚡ AJProxy Interceptor Active</h1>\n\
-            <div class=\"status\">PROXY LISTENER RUNNING</div>\n\
-            <p>Your browser traffic is being proxied through <strong>AJProxy</strong>.</p>\n\
-            <p>All HTTP/HTTPS requests are being recorded and intercepted in real-time.</p>\n\
-            <div style=\"margin-top: 25px;\">{}</div>\n\
-            </div>\n\
-            </body></html>",
-            cert_button
-        );
-
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            html.len(),
-            html
-        );
-        let _ = client_stream.write_all(resp.as_bytes());
-        return;
     }
 
     if first_line.starts_with("CONNECT ") {

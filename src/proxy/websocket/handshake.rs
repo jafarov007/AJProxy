@@ -49,11 +49,13 @@ pub fn handle_tls_websocket_tunnel(
         format!("{}:443", target_host)
     };
 
+    let sni_host = target_host.split(':').next().unwrap_or(target_host);
+
     if let Ok(server_tcp) = TcpStream::connect(&target_addr) {
         let _ = server_tcp.set_read_timeout(Some(Duration::from_secs(10)));
         let _ = server_tcp.set_write_timeout(Some(Duration::from_secs(10)));
 
-        if let Ok(mut server_tls) = connector.connect(target_host, server_tcp) {
+        if let Ok(mut server_tls) = connector.connect(sni_host, server_tcp) {
             let _ = server_tls.write_all(req_headers.as_bytes());
             let _ = server_tls.write_all(b"\r\n\r\n");
             if !req_body_bytes.is_empty() {

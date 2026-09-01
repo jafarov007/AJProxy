@@ -26,9 +26,25 @@ It features a modern graphical user interface powered by `egui`, enabling securi
   - **Zero-Byte Suppression**: One-click toggle to suppress 0-length responses (e.g., 204 No Content, empty preflight packets).
   - **Pre-Configured Asset Filtering**: Hides `.css`, `.js`, `.png`, `.jpg`, `.gif`, `.svg`, `.ico`, `.woff2`, Cloudflare challenges, and telemetry.
 
-### 🔑 Cross-Platform Certificate Trust Engine (Linux / macOS / Windows)
-- **Modular OS Installers** (`linux.rs`, `windows.rs`, `macos.rs`): Automatically generates 365-day compliant Root CA certificates with one-click automatic CA trust installation and cleanup for system/browser trust stores across Linux, Windows, and macOS.
+### 🔑 Certificate Trust Engine & Platform Support
+- **Modular OS Installers** (`linux.rs`, `windows.rs`, `macos.rs`): Generates 365-day compliant Root CA certificates with one-click automatic CA trust installation for system and browser trust stores.
 - **Direct TCP Media Passthrough**: Zero-overhead passthrough for video streaming CDNs (`googlevideo.com`, `gvt1.com`, `ytimg.com`) ensuring 4K video streaming without buffering.
+
+> [!NOTE]
+> **Platform Support Status:**
+> - **Linux**: Fully tested, rock-solid, and ready for production/daily security research. Automatic Root CA trust installation and browser interception work out-of-the-box seamlessly.
+> - **Windows & macOS**: Automatic Root CA system trust installation and embedded browser integration are currently undergoing active testing, bug fixes, and continuous refinement.
+
+---
+
+## 🌐 Remote Device Access & CA Certificate Installation
+
+To intercept traffic from mobile phones, tablets, or other computers on the same local network:
+
+1. Navigate to **Settings** in AJProxy.
+2. Change the **Bind Address** from `127.0.0.1` to `0.0.0.0` and ensure the listener is active.
+3. Configure the remote device's Wi-Fi/Network proxy settings to point to `http://<YOUR_HOST_IP>:8080`.
+4. On the remote device, open a web browser and visit `http://<YOUR_HOST_IP>:8080` or `http://<YOUR_HOST_IP>:8080/cert` to instantly download and install the AJProxy Root CA Certificate (`ajproxy_ca.crt`).
 
 ### 🛠️ Security Testing Toolkit
 - Integrated modules: **Dashboard**, **HTTP Traffic History**, **HTTP Repeater**, **WebSocket Suite**, **Sitemap**, **Comparer**, **Decoder**, **Intruder/Bruteforce**, and **Settings**.

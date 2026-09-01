@@ -5,8 +5,8 @@ use crate::theme::*;
 pub fn render(
     ui: &mut egui::Ui,
     active_tab: &mut Tab,
-    proxy_running: &mut bool,
-    listen_addr: &str,
+    _proxy_running: &mut bool,
+    _listen_addr: &str,
     listen_port: u16,
 ) {
     ui.horizontal_centered(|ui| {
@@ -142,52 +142,6 @@ pub fn render(
                 .stroke(Stroke::NONE)
             ).clicked() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            }
-
-            ui.add_space(4.0);
-            ui.separator();
-            ui.add_space(4.0);
-
-            // Proxy Status Pill
-            let (status_text, status_bg, status_fg, status_stroke) = if *proxy_running {
-                (
-                    format!("● {}:{}", listen_addr, listen_port),
-                    Color32::from_rgb(10, 38, 22),
-                    Color32::from_rgb(74, 222, 128),
-                    Stroke::new(1.0_f32, Color32::from_rgb(34, 197, 94)),
-                )
-            } else {
-                (
-                    format!("○ {}:{} (OFF)", listen_addr, listen_port),
-                    BG_RAISED,
-                    TEXT_2,
-                    Stroke::new(1.0_f32, BORDER_DIM),
-                )
-            };
-
-            let toggle_btn = ui.add(
-                egui::Button::new(
-                    RichText::new(status_text)
-                        .size(11.0)
-                        .color(status_fg)
-                        .strong()
-                        .family(FontFamily::Monospace),
-                )
-                .fill(status_bg)
-                .stroke(status_stroke)
-                .rounding(Rounding::same(10.0))
-            );
-
-            if toggle_btn.clicked() {
-                *proxy_running = !*proxy_running;
-            }
-
-            if toggle_btn.hovered() {
-                egui::show_tooltip_text(
-                    ui.ctx(),
-                    toggle_btn.id,
-                    if *proxy_running { "Click to stop HTTP/HTTPS listener" } else { "Click to start HTTP/HTTPS listener" },
-                );
             }
         });
     });

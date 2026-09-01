@@ -16,6 +16,32 @@ use crate::proxy::websocket::{is_websocket_upgrade, handle_tls_websocket_tunnel}
 use crate::proxy::store::*;
 use crate::proxy::listener::UPSTREAM_AGENT;
 
+fn send_upstream_request(method: &str, url: &str, req_headers: &str, req_body: &str) -> Result<ureq::Response, ureq::Error> {
+    let mut req = UPSTREAM_AGENT.request(method, url);
+
+    for line in req_headers.lines().skip(1) {
+        if let Some((k, v)) = line.split_once(':') {
+            let k = k.trim();
+            let v = v.trim();
+            if !k.eq_ignore_ascii_case("Proxy-Connection")
+                && !k.eq_ignore_ascii_case("Proxy-Authorization")
+                && !k.eq_ignore_ascii_case("Host")
+                && !k.eq_ignore_ascii_case("Connection")
+                && !k.eq_ignore_ascii_case("Content-Length")
+                && !k.eq_ignore_ascii_case("Accept-Encoding")
+            {
+                req = req.set(k, v);
+            }
+        }
+    }
+
+    if !req_body.is_empty() {
+        req.send_bytes(req_body.as_bytes())
+    } else {
+        req.call()
+    }
+}
+
 /// Full TLS MITM Interception Handler with HTTP Keep-Alive
 pub fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str, _start_time: Instant) {
     let first_line = request_str.lines().next().unwrap_or("");
@@ -113,7 +139,15 @@ pub fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str
         Ok(s) => s,
         Err(e) => {
             let err_msg = e.to_string();
-            if !err_msg.contains("unexpected EOF") && !err_msg.contains("Connection reset by peer") {
+            let is_pinning_or_noise = err_msg.contains("unexpected EOF")
+                || err_msg.contains("Connection reset by peer")
+                || err_msg.contains("certificate unknown")
+                || err_msg.contains("unsupported protocol")
+                || err_msg.contains("bad record mac")
+                || err_msg.contains("unknown ca")
+                || err_msg.contains("alert number 46");
+
+            if !is_pinning_or_noise {
                 eprintln!("[AJProxy MITM] Handshake failed with browser for {}: {}", target_host, e);
             }
             return;
@@ -185,27 +219,9 @@ pub fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str
             }
         }
 
-        let mut req = UPSTREAM_AGENT.request(&method, &full_url);
-
-        for line in req_headers.lines().skip(1) {
-            if let Some((k, v)) = line.split_once(':') {
-                let k = k.trim();
-                let v = v.trim();
-                if !k.eq_ignore_ascii_case("Proxy-Connection") && !k.eq_ignore_ascii_case("Host") {
-                    if k.eq_ignore_ascii_case("Accept-Encoding") {
-                        req = req.set(k, "gzip, deflate");
-                    } else {
-                        req = req.set(k, v);
-                    }
-                }
-            }
-        }
-
-        let send_res = if !req_body.is_empty() {
-            req.send_bytes(req_body.as_bytes())
-        } else {
-            req.call()
-        };
+        // ── Build and send upstream request ──
+        let attempt_url = full_url.clone();
+        let send_res = send_upstream_request(&method, &attempt_url, &req_headers, &req_body);
 
         match send_res {
             Ok(resp) => {
@@ -216,12 +232,35 @@ pub fn handle_https_connect_mitm(mut client_stream: TcpStream, request_str: &str
             }
             Err(e) => {
                 let err_str = e.to_string();
+                let is_tls_mismatch = err_str.contains("wrong version number")
+                    || err_str.contains("tls_validate_record_header");
+
+                // ── TLS Fallback: port 443 serves plain HTTP instead of TLS ──
+                if is_tls_mismatch {
+                    let fallback_url = full_url.replacen("https://", "http://", 1);
+                    let fallback_res = send_upstream_request(&method, &fallback_url, &req_headers, &req_body);
+                    match fallback_res {
+                        Ok(resp) => {
+                            process_and_send_response(&mut tls_stream, resp, &method, &target_host, raw_path, &full_url, &req_headers, &req_body, request_start);
+                            continue;
+                        }
+                        Err(ureq::Error::Status(_, resp)) => {
+                            process_and_send_response(&mut tls_stream, resp, &method, &target_host, raw_path, &full_url, &req_headers, &req_body, request_start);
+                            continue;
+                        }
+                        Err(_) => {} // fallback also failed, fall through to error
+                    }
+                }
+
                 let is_noisy = full_url.contains("android.clients.google.com/checkin")
                     || full_url.contains("clients1.google.com")
                     || full_url.contains("clients2.google.com")
                     || full_url.contains("update.googleapis.com")
+                    || full_url.contains("optimizationguide")
                     || full_url.contains("localhost.sensic.net")
-                    || full_url.contains("omnitagjs.com");
+                    || full_url.contains("omnitagjs.com")
+                    || is_tls_mismatch
+                    || err_str.contains("Connection reset");
 
                 if !is_noisy {
                     eprintln!("[AJProxy MITM] Upstream request failed for {}: {}", full_url, err_str);
