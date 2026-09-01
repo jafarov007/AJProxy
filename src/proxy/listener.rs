@@ -22,6 +22,7 @@ lazy_static::lazy_static! {
 
         ureq::AgentBuilder::new()
             .tls_connector(Arc::new(tls_connector))
+            .redirects(0)
             .timeout(Duration::from_secs(60))
             .max_idle_connections(100)
             .max_idle_connections_per_host(10)

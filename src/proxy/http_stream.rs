@@ -129,7 +129,7 @@ pub fn process_and_send_response<W: Write>(
     let mut resp_headers_str = format!("HTTP/1.1 {} {}\r\n", status, status_str);
     let mut forwarded_headers = String::new();
     for h_name in resp.headers_names() {
-        if let Some(h_val) = resp.header(&h_name) {
+        for h_val in resp.all(&h_name) {
             resp_headers_str.push_str(&format!("{}: {}\r\n", h_name, h_val));
             if !h_name.eq_ignore_ascii_case("content-length")
                 && !h_name.eq_ignore_ascii_case("transfer-encoding")

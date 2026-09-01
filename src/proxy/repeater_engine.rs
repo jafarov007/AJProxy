@@ -31,6 +31,7 @@ pub fn execute_repeater_request(tab: &mut RepeaterTab) {
     };
 
     let agent = ureq::AgentBuilder::new()
+        .redirects(0)
         .timeout(std::time::Duration::from_secs(15))
         .build();
 
