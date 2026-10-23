@@ -8,6 +8,12 @@ AJProxy is a high-performance, lightweight HTTP/HTTPS interception proxy and pen
 
 Featuring a dark-themed graphical user interface built with `egui`, AJProxy provides real-time HTTP/HTTPS traffic analysis, interactive request manipulation, an advanced RFC 6455 WebSocket suite, and a customizable Intruder engine.
 
+## Screenshot
+
+<p align="center">
+  <img src="image.png" alt="AJProxy Intruder UI" width="100%">
+</p>
+
 ---
 
 ## Table of Contents
